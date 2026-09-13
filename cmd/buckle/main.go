@@ -7,15 +7,20 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"net"
+	"net/http"
 	"os"
 	"os/signal"
 	"os/user"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
 	"time"
 
 	"buckle/internal/report"
+	"buckle/internal/server"
+	"buckle/internal/serverdb"
 	"buckle/internal/store"
 	"buckle/internal/watch"
 )
@@ -25,6 +30,7 @@ const version = "0.1.0-dev"
 const usage = `usage:
   sudo buckle watch [--buffer 5s] [--db PATH]
   buckle migrate [--db PATH]
+  buckle serve [--addr 127.0.0.1:8080] [--db PATH] [--refresh 10s]
   buckle query sessions [filters] [--format json|jsonl|csv]
   buckle query runs     [filters] [--format json|jsonl|csv]
   buckle query run <id>           [--format json|jsonl|csv]
@@ -64,6 +70,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 		err = cmdWatch(args[1:], stderr)
 	case "migrate":
 		err = cmdMigrate(args[1:], stdout, stderr)
+	case "serve":
+		err = cmdServe(args[1:], stderr)
 	case "query":
 		err = cmdQuery(args[1:], stdout, stderr)
 	case "report":
@@ -152,6 +160,63 @@ func cmdMigrate(args []string, stdout, stderr io.Writer) error {
 		fmt.Fprintf(stdout, "migrated %s to schema v2 (db_instance %s)\n", path, inst)
 	} else {
 		fmt.Fprintf(stdout, "%s is already schema v2 (db_instance %s)\n", path, inst)
+	}
+	return nil
+}
+
+func cmdServe(args []string, stderr io.Writer) error {
+	fs := flag.NewFlagSet("serve", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	addr := fs.String("addr", "127.0.0.1:8080", "listen address (no auth: keep it on loopback)")
+	dbPath := fs.String("db", "", "server database path")
+	refresh := fs.Duration("refresh", 10*time.Second, "list page auto-refresh interval; 0 disables")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() > 0 {
+		return usageError{"serve takes no arguments"}
+	}
+	if *refresh < 0 {
+		return usageError{"--refresh must not be negative"}
+	}
+	path := *dbPath
+	if path == "" {
+		home, err := invokingHome()
+		if err != nil {
+			return err
+		}
+		path = serverdb.PathForHome(home)
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return err
+	}
+	db, err := serverdb.Open(path)
+	if err != nil {
+		return fmt.Errorf("open server database: %w", err)
+	}
+	defer db.Close()
+	logf := func(format string, a ...any) { fmt.Fprintf(stderr, "buckle: "+format+"\n", a...) }
+	if host, _, err := net.SplitHostPort(*addr); err != nil {
+		return usageError{"--addr: " + err.Error()}
+	} else if ip := net.ParseIP(host); host != "localhost" && (ip == nil || !ip.IsLoopback()) {
+		logf("warning: %s is not a loopback address and buckle serve has no authentication", *addr)
+	}
+	srv := &http.Server{
+		Addr:              *addr,
+		Handler:           server.New(server.Options{DB: db, Refresh: *refresh, Log: logf}),
+		ReadHeaderTimeout: 10 * time.Second,
+	}
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+	go func() {
+		<-ctx.Done()
+		shutdown, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		srv.Shutdown(shutdown)
+	}()
+	logf("serving http://%s; database %s", *addr, path)
+	if err := srv.ListenAndServe(); !errors.Is(err, http.ErrServerClosed) {
+		return err
 	}
 	return nil
 }
