@@ -4,6 +4,9 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+	"time"
+
+	"buckle/internal/serverdb"
 )
 
 func argsJSON(t *testing.T, args ...string) string {
@@ -76,6 +79,105 @@ func TestNewArgsView(t *testing.T) {
 		}
 		if c.full && v.Full != argv(c.js) {
 			t.Errorf("%s: Full is not the complete quoted argv", c.name)
+		}
+	}
+}
+
+func i64(n int64) *int64 { return &n }
+
+func TestSpan(t *testing.T) {
+	const start = int64(1_789_334_604_482_000_000)
+	cases := []struct {
+		name       string
+		start, end any
+		want       string
+	}{
+		{"milliseconds", start, i64(start + 44_000_000), "44 ms"},
+		{"zero length", start, i64(start), "0 ms"},
+		{"just under a second", start, i64(start + 999_999_999), "999 ms"},
+		{"seconds keep one decimal", start, start + 5_420_000_000, "5.4 s"},
+		{"seconds never round up to a minute", start, start + 59_960_000_000, "59.9 s"},
+		{"one minute", start, start + 60_000_000_000, "1m 00s"},
+		{"minutes", start, start + 1_113_276_000_000, "18m 33s"},
+		{"hours", start, start + 3_725_000_000_000, "1h 02m"},
+		{"end not recorded", start, (*int64)(nil), "unknown"},
+		{"start not recorded", int64(0), i64(start), "unknown"},
+		{"end before start", start, start - 1, "unknown"},
+	}
+	for _, c := range cases {
+		if got := span(c.start, c.end); got != c.want {
+			t.Errorf("%s: span = %q, want %q", c.name, got, c.want)
+		}
+	}
+}
+
+func TestStamp(t *testing.T) {
+	pdt := time.FixedZone("PDT", -7*3600)
+	const ns = int64(1_789_334_604_482_000_000) // run 5's start
+	cases := []struct {
+		name       string
+		v          any
+		utc, local string
+	}{
+		{"int64", ns, "2026-09-13 21:23:24.482 UTC", "14:23:24.482 PDT"},
+		{"pointer", i64(ns), "2026-09-13 21:23:24.482 UTC", "14:23:24.482 PDT"},
+		{"zero", int64(0), "unknown", ""},
+		{"nil pointer", (*int64)(nil), "unknown", ""},
+	}
+	for _, c := range cases {
+		if utc, local := stamp(c.v, pdt); utc != c.utc || local != c.local {
+			t.Errorf("%s: stamp = %q, %q; want %q, %q", c.name, utc, local, c.utc, c.local)
+		}
+	}
+}
+
+func TestDenialClass(t *testing.T) {
+	for n, want := range map[int64]string{0: "", 1: "warn", 19: "warn", 20: "hot", 69: "hot"} {
+		if got := denialClass(n); got != want {
+			t.Errorf("denialClass(%d) = %q, want %q", n, got, want)
+		}
+	}
+}
+
+func TestTotals(t *testing.T) {
+	runs := []serverdb.RunSummary{
+		{ID: 2, ProcessCount: 5, DenialCount: 1},
+		{ID: 6, ProcessCount: 5, DenialCount: 69},
+		{ID: 7, ProcessCount: 6, DenialCount: 0},
+	}
+	if p, d := runTotals(runs); p != 16 || d != 70 {
+		t.Errorf("runTotals = %d processes, %d denials; want 16, 70", p, d)
+	}
+	denials := []serverdb.Denial{{ID: 1, Count: 1}, {ID: 2, Count: 3}}
+	if got := denialTotal(denials); got != 4 {
+		t.Errorf("denialTotal = %d, want 4", got)
+	}
+}
+
+func TestTimelineKinds(t *testing.T) {
+	d := serverdb.RunDetail{
+		Processes: []serverdb.Process{
+			{ID: 1, PID: 100, Path: "/usr/bin/sandbox-exec", ArgsJSON: "[]", StartedAt: i64(10), EndedAt: i64(60), EndReason: "exit", ExitStatus: i64(0)},
+			{ID: 2, PID: 101, Path: "/bin/zsh", ArgsJSON: "[]", ParentProcessID: i64(1), StartedAt: i64(20), EndReason: "watch_stopped"},
+			{ID: 3, PID: 101, Path: "/bin/sh", ArgsJSON: "[]", ParentProcessID: i64(1), ExecPrevProcessID: i64(2), StartedAt: i64(30), EndedAt: i64(50), EndReason: "exec"},
+		},
+		Denials: []serverdb.Denial{{ID: 1, Time: 40, PID: 101, Operation: "file-write-create", Count: 1}},
+	}
+	want := []struct{ kind, label string }{
+		{"start", "start"},
+		{"fork", "fork"},
+		{"exec", "exec"},
+		{"denial", "denial"},
+		{"exit", "exit (status 0)"},
+		{"stopped", "watch stopped, end unknown"},
+	}
+	es := timeline(d)
+	if len(es) != len(want) {
+		t.Fatalf("timeline has %d entries, want %d: %+v", len(es), len(want), es)
+	}
+	for i, w := range want {
+		if es[i].Kind != w.kind || es[i].Label != w.label {
+			t.Errorf("entry %d = %s/%q, want %s/%q", i, es[i].Kind, es[i].Label, w.kind, w.label)
 		}
 	}
 }

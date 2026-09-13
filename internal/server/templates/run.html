@@ -1,43 +1,50 @@
 {{define "content"}}
 {{$r := .Data.Run}}
-<p><a href="/">← Hosts</a> ·
-{{if $r.SessionID}}<a href="/hosts/{{$r.HostUUID}}/{{$r.DBInstance}}/sessions/{{deref $r.SessionID}}">session {{if $r.SessionKey}}<code>{{$r.SessionKey}}</code>{{else}}(unknown){{end}}</a>
-{{else}}<a href="/hosts/{{$r.HostUUID}}/{{$r.DBInstance}}/untagged">untagged runs</a>{{end}}</p>
-<h1>Run {{$r.ID}} <span class="muted">{{$r.Kind}} · {{$r.Status}}</span></h1>
-<table>
-<tr><th>Host</th><td>{{if $r.HostName}}{{$r.HostName}}{{else}}unknown{{end}} <span class="muted">{{$r.HostUUID}}</span></td></tr>
-<tr><th>Command</th><td><code>{{argv $r.CommandJSON}}</code></td></tr>
-<tr><th>Working directory</th><td><code>{{$r.Cwd}}</code></td></tr>
-<tr><th>Started</th><td>{{ts $r.StartedAt}}{{if $r.StartedBeforeWatch}} <span class="badge np">started before watch</span>{{end}}</td></tr>
-<tr><th>Ended</th><td>{{ts $r.EndedAt}}</td></tr>
-{{if $r.TagCommand}}<tr><th>Claude tool use</th><td><code>{{$r.TagCommand}}</code></td></tr>{{end}}
-{{if $r.ParentRunID}}<tr><th>Parent run</th><td><a href="/hosts/{{$r.HostUUID}}/{{$r.DBInstance}}/runs/{{deref $r.ParentRunID}}">run {{deref $r.ParentRunID}}</a></td></tr>{{end}}
-{{if $r.Children}}<tr><th>Child runs</th><td>{{range $r.Children}}<a href="/hosts/{{$r.HostUUID}}/{{$r.DBInstance}}/runs/{{.}}">run {{.}}</a> {{end}}</td></tr>{{end}}
-<tr><th>Profile</th><td>{{$r.ProfileSource}}{{with $r.ProfileName}} · name <code>{{.}}</code>{{end}}{{with $r.ProfilePath}} · file <code>{{.}}</code>{{end}}{{with $r.ProfileError}} · <span class="note">{{.}}</span>{{end}}</td></tr>
-{{if ne $r.ParamsJSON "[]"}}<tr><th>Parameters</th><td><code>{{$r.ParamsJSON}}</code></td></tr>{{end}}
-</table>
+<h1>Run {{$r.ID}}{{with $r.Kind}} <span class="tag">{{.}}</span>{{end}}{{with $r.Status}} <span class="tag">{{.}}</span>{{end}}{{if $r.StartedBeforeWatch}} <span class="badge np">started before watch</span>{{end}}</h1>
+<div class="stats">
+<div class="stat"><div class="k">Duration</div><div class="v">{{span $r.StartedAt $r.EndedAt}}</div></div>
+<div class="stat"><div class="k">Processes</div><div class="v">{{len $r.Processes}}</div></div>
+<div class="stat {{denialClass .Data.DenialTotal}}"><div class="k">Denials ≥</div><div class="v">{{.Data.DenialTotal}}</div></div>
+<div class="stat"><div class="k">Profile</div><div class="v">{{with $r.ProfileSource}}{{.}}{{else}}unknown{{end}}</div></div>
+</div>
+<section class="panel">
+<dl>
+<dt>Host</dt><dd>{{if $r.HostName}}{{$r.HostName}}{{else}}unknown{{end}} <span class="muted">{{$r.HostUUID}}</span></dd>
+<dt>Command</dt><dd><code>{{argv $r.CommandJSON}}</code></dd>
+<dt>Working directory</dt><dd><code>{{$r.Cwd}}</code></dd>
+<dt>Started</dt><dd>{{ts $r.StartedAt}}</dd>
+<dt>Ended</dt><dd>{{ts $r.EndedAt}}</dd>
+{{if $r.TagCommand}}<dt>Claude tool use</dt><dd><code>{{$r.TagCommand}}</code></dd>{{end}}
+{{if $r.ParentRunID}}<dt>Parent run</dt><dd><a href="/hosts/{{$r.HostUUID}}/{{$r.DBInstance}}/runs/{{deref $r.ParentRunID}}">run {{deref $r.ParentRunID}}</a></dd>{{end}}
+{{if $r.Children}}<dt>Child runs</dt><dd>{{range $r.Children}}<a href="/hosts/{{$r.HostUUID}}/{{$r.DBInstance}}/runs/{{.}}">run {{.}}</a> {{end}}</dd>{{end}}
+<dt>Profile</dt><dd>{{$r.ProfileSource}}{{with $r.ProfileName}} · name <code>{{.}}</code>{{end}}{{with $r.ProfilePath}} · file <code>{{.}}</code>{{end}}{{with $r.ProfileError}} · <span class="note">{{.}}</span>{{end}}</dd>
+{{if ne $r.ParamsJSON "[]"}}<dt>Parameters</dt><dd><code>{{$r.ParamsJSON}}</code></dd>{{end}}
+</dl>
 {{if $r.ProfileText}}<details><summary>Profile text ({{len $r.ProfileText}} bytes)</summary><pre>{{$r.ProfileText}}</pre></details>
-{{else if $r.ProfileMissing}}<p class="muted">Profile text not received yet.</p>{{end}}
+{{else if $r.ProfileMissing}}<div class="foot">Profile text not received yet.</div>{{end}}
+</section>
 
-<h2>Timeline</h2>
-<p class="note">{{.Data.Note}}</p>
-<table>
-<tr><th>Offset</th><th>Time</th><th>Event</th><th>Detail</th></tr>
+<section class="panel">
+<div class="ph">Timeline <span class="right note">{{.Data.Note}}</span></div>
+<table class="timeline">
+<tr><th class="n">Offset</th><th>Time</th><th>Event</th><th class="n">PID</th><th>Detail</th></tr>
 {{range $e := .Data.Timeline}}
-<tr{{if .Denial}} class="deny"{{else if eq .Label "fork"}} class="fork"{{else if eq .Label "exec"}} class="exec"{{end}}>
-<td><code>{{offset $r.StartedAt .At}}</code></td>
-<td>{{ts .At}}</td>
-<td>{{.Label}}</td>
+<tr class="{{.Kind}}">
+<td class="off">{{offset $r.StartedAt .At}}</td>
+<td class="t">{{utc .At}}{{with local .At}}<small>{{.}}</small>{{end}}</td>
+<td><span class="chip">{{.Label}}</span></td>
+<td class="pid">{{with .Process}}{{.PID}}{{with .PIDVersion}}<small>{{deref .}}</small>{{end}}{{end}}{{with .Denial}}{{.PID}}{{end}}</td>
 <td>
-{{with .Denial}}<code>{{.Operation}}</code> <code>{{.Target}}</code> ×{{.Count}} · {{.ProcessName}}({{.PID}}) {{platform .IsPlatform}}
+{{with .Denial}}<code>{{.Operation}}</code> <code>{{.Target}}</code> ×{{.Count}} · {{.ProcessName}} {{platform .IsPlatform}}
 {{if and .Message (ne .Message $r.Tag)}}<br><span class="muted">{{.Message}}</span>{{end}}{{end}}
-{{with .Process}}pid {{.PID}}{{with .PIDVersion}}/{{deref .}}{{end}} <code>{{.Path}}</code> {{platform .IsPlatform}}{{if $e.Args}}{{with .SigningID}} <span class="muted">{{.}}</span>{{end}}{{with .TeamID}} <span class="muted">team {{.}}</span>{{end}}{{end}}{{end}}
-{{with .Args}}{{if eq $e.Label "fork"}}<details class="args"><summary>arguments</summary><pre>{{if .Full}}{{.Full}}{{else}}{{.Text}}{{end}}</pre></details>
-{{else}}<br><code>{{.Text}}</code>{{if .Full}}<details class="args"><summary>full arguments</summary><pre>{{.Full}}</pre></details>{{end}}{{end}}{{end}}
+{{with .Process}}<code class="path">{{.Path}}</code> {{platform .IsPlatform}}{{if $e.Args}}{{with .SigningID}} <span class="muted">{{.}}</span>{{end}}{{with .TeamID}} <span class="muted">team {{.}}</span>{{end}}{{end}}{{end}}
+{{with .Args}}{{if eq $e.Kind "fork"}}<details class="args"><summary>arguments</summary><pre>{{if .Full}}{{.Full}}{{else}}{{.Text}}{{end}}</pre></details>
+{{else}}<code class="argv">{{.Text}}</code>{{if .Full}}<details class="args"><summary>full arguments</summary><pre>{{.Full}}</pre></details>{{end}}{{end}}{{end}}
 </td>
 </tr>
 {{else}}
-<tr><td colspan="4" class="muted">No process events or denials recorded.</td></tr>
+<tr><td colspan="5" class="empty">No process events or denials recorded.</td></tr>
 {{end}}
 </table>
+</section>
 {{end}}

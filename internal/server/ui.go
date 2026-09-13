@@ -25,30 +25,99 @@ var templateFS embed.FS
 
 type page struct {
 	Title   string
-	Refresh int // seconds; 0 omits the meta refresh
+	Refresh int     // seconds; 0 omits the meta refresh
+	Crumbs  []crumb // header breadcrumbs, ending with the current page
 	Data    any
 }
 
+// crumb is one header breadcrumb. The current page and hosts, which have no page, leave Href empty.
+type crumb struct {
+	Text, Href string
+	Code       bool // monospace, for session keys
+}
+
 type runsPage struct {
-	Heading              string
-	HostUUID, DBInstance string
-	Session              *serverdb.SessionSummary
-	Runs                 []serverdb.RunSummary
+	HostUUID, DBInstance      string
+	Session                   *serverdb.SessionSummary // nil for untagged runs
+	Runs                      []serverdb.RunSummary
+	ProcessTotal, DenialTotal int64
 }
 
 type runPage struct {
-	Run      serverdb.RunDetail
-	Timeline []entry
-	Note     string
+	Run         serverdb.RunDetail
+	Timeline    []entry
+	Note        string
+	DenialTotal int64
 }
 
 // entry is one timeline row: a process start or end, or a denial.
 type entry struct {
 	At      *int64
+	Kind    string
 	Label   string
 	Process *serverdb.Process
 	Denial  *serverdb.Denial
 	Args    *argsView // process starts only
+}
+
+// stamp formats a nanosecond timestamp (int64 or *int64) as a full UTC time and a time of day in
+// loc. A missing timestamp is "unknown" with no local part.
+func stamp(v any, loc *time.Location) (utc, local string) {
+	ns, ok := nsOf(v)
+	if !ok || ns == 0 {
+		return "unknown", ""
+	}
+	t := time.Unix(0, ns)
+	return t.UTC().Format("2006-01-02 15:04:05.000 UTC"), t.In(loc).Format("15:04:05.000 MST")
+}
+
+// Denial counts at or above denialHot get a solid chip; lower nonzero counts get a tinted one.
+const denialHot = 20
+
+func denialClass(n int64) string {
+	switch {
+	case n >= denialHot:
+		return "hot"
+	case n > 0:
+		return "warn"
+	}
+	return ""
+}
+
+// span formats the time between two nanosecond timestamps (int64 or *int64), or "unknown" when
+// either is missing or they are out of order.
+func span(start, end any) string {
+	s, okS := nsOf(start)
+	e, okE := nsOf(end)
+	if !okS || !okE || s == 0 || e < s {
+		return "unknown"
+	}
+	d := time.Duration(e - s)
+	switch {
+	case d < time.Second:
+		return fmt.Sprintf("%d ms", d.Milliseconds())
+	case d < time.Minute:
+		return fmt.Sprintf("%.1f s", d.Truncate(100*time.Millisecond).Seconds())
+	case d < time.Hour:
+		return fmt.Sprintf("%dm %02ds", int(d.Minutes()), int(d.Seconds())%60)
+	}
+	return fmt.Sprintf("%dh %02dm", int(d.Hours()), int(d.Minutes())%60)
+}
+
+func runTotals(runs []serverdb.RunSummary) (processes, denials int64) {
+	for _, r := range runs {
+		processes += r.ProcessCount
+		denials += r.DenialCount
+	}
+	return processes, denials
+}
+
+func denialTotal(ds []serverdb.Denial) int64 {
+	var n int64
+	for _, d := range ds {
+		n += d.Count
+	}
+	return n
 }
 
 func (s *server) routes(mux *http.ServeMux) {
@@ -148,13 +217,16 @@ func nsOf(v any) (int64, bool) {
 func (s *server) funcs() template.FuncMap {
 	return template.FuncMap{
 		"ts": func(v any) string {
-			ns, ok := nsOf(v)
-			if !ok || ns == 0 {
-				return "unknown"
+			utc, local := stamp(v, s.Location)
+			if local == "" {
+				return utc
 			}
-			t := time.Unix(0, ns)
-			return t.UTC().Format("2006-01-02 15:04:05.000 UTC") + " · " + t.In(s.Location).Format("15:04:05.000 MST")
+			return utc + " · " + local
 		},
+		"utc":         func(v any) string { utc, _ := stamp(v, s.Location); return utc },
+		"local":       func(v any) string { _, local := stamp(v, s.Location); return local },
+		"span":        span,
+		"denialClass": denialClass,
 		"offset": func(start int64, at *int64) template.HTML {
 			if at == nil || start == 0 {
 				return ""
@@ -209,12 +281,20 @@ func (s *server) index(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, err)
 		return
 	}
-	s.render(w, "index", page{Title: "Hosts", Refresh: s.refreshSeconds(), Data: hosts})
+	s.render(w, "index", page{Title: "Hosts", Refresh: s.refreshSeconds(), Crumbs: []crumb{{Text: "Hosts"}}, Data: hosts})
 }
 
 func pathID(r *http.Request) (int64, bool) {
 	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
 	return id, err == nil
+}
+
+// hostCrumbs starts the breadcrumbs of a page under the named host.
+func hostCrumbs(name string) []crumb {
+	if name == "" {
+		name = "unknown host"
+	}
+	return []crumb{{Text: "Hosts", Href: "/"}, {Text: name}}
 }
 
 func (s *server) session(w http.ResponseWriter, r *http.Request) {
@@ -229,12 +309,19 @@ func (s *server) session(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, err)
 		return
 	}
-	heading := "Session " + sess.Key
-	if sess.Key == "" {
-		heading = fmt.Sprintf("Session #%d (not received yet)", id)
+	name, err := s.DB.HostName(host)
+	if err != nil {
+		s.fail(w, err)
+		return
 	}
-	s.render(w, "runs", page{Title: heading, Refresh: s.refreshSeconds(),
-		Data: runsPage{Heading: heading, HostUUID: host, DBInstance: inst, Session: &sess, Runs: runs}})
+	title, last := "Session "+sess.Key, crumb{Text: sess.Key, Code: true}
+	if sess.Key == "" {
+		title = fmt.Sprintf("Session #%d (not received yet)", id)
+		last = crumb{Text: fmt.Sprintf("session #%d", id)}
+	}
+	d := runsPage{HostUUID: host, DBInstance: inst, Session: &sess, Runs: runs}
+	d.ProcessTotal, d.DenialTotal = runTotals(runs)
+	s.render(w, "runs", page{Title: title, Refresh: s.refreshSeconds(), Crumbs: append(hostCrumbs(name), last), Data: d})
 }
 
 func (s *server) untagged(w http.ResponseWriter, r *http.Request) {
@@ -244,8 +331,15 @@ func (s *server) untagged(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, err)
 		return
 	}
+	name, err := s.DB.HostName(host)
+	if err != nil {
+		s.fail(w, err)
+		return
+	}
+	d := runsPage{HostUUID: host, DBInstance: inst, Runs: runs}
+	d.ProcessTotal, d.DenialTotal = runTotals(runs)
 	s.render(w, "runs", page{Title: "Untagged runs", Refresh: s.refreshSeconds(),
-		Data: runsPage{Heading: "Untagged runs", HostUUID: host, DBInstance: inst, Runs: runs}})
+		Crumbs: append(hostCrumbs(name), crumb{Text: "Untagged runs"}), Data: d})
 }
 
 func (s *server) run(w http.ResponseWriter, r *http.Request) {
@@ -259,8 +353,20 @@ func (s *server) run(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, err)
 		return
 	}
-	s.render(w, "run", page{Title: fmt.Sprintf("Run %d", id),
-		Data: runPage{Run: d, Timeline: timeline(d), Note: report.LowerBoundNote}})
+	crumbs := hostCrumbs(d.HostName)
+	switch {
+	case d.SessionID == nil:
+		crumbs = append(crumbs, crumb{Text: "Untagged runs", Href: fmt.Sprintf("/hosts/%s/%s/untagged", d.HostUUID, d.DBInstance)})
+	case d.SessionKey == "":
+		crumbs = append(crumbs, crumb{Text: fmt.Sprintf("session #%d", *d.SessionID),
+			Href: fmt.Sprintf("/hosts/%s/%s/sessions/%d", d.HostUUID, d.DBInstance, *d.SessionID)})
+	default:
+		crumbs = append(crumbs, crumb{Text: d.SessionKey, Code: true,
+			Href: fmt.Sprintf("/hosts/%s/%s/sessions/%d", d.HostUUID, d.DBInstance, *d.SessionID)})
+	}
+	crumbs = append(crumbs, crumb{Text: fmt.Sprintf("Run %d", id)})
+	s.render(w, "run", page{Title: fmt.Sprintf("Run %d", id), Crumbs: crumbs,
+		Data: runPage{Run: d, Timeline: timeline(d), Note: report.LowerBoundNote, DenialTotal: denialTotal(d.Denials)}})
 }
 
 // timeline interleaves process starts and ends with denials by time. Entries without a time go
@@ -277,20 +383,20 @@ func timeline(d serverdb.RunDetail) []entry {
 		case p.ParentProcessID != nil:
 			label = "fork"
 		}
-		es = append(es, entry{At: p.StartedAt, Label: label, Process: p, Args: newArgsView(p.Path, p.ArgsJSON)})
+		es = append(es, entry{At: p.StartedAt, Kind: label, Label: label, Process: p, Args: newArgsView(p.Path, p.ArgsJSON)})
 		switch p.EndReason {
 		case "exit":
 			l := "exit"
 			if p.ExitStatus != nil {
 				l = fmt.Sprintf("exit (status %d)", *p.ExitStatus)
 			}
-			es = append(es, entry{At: p.EndedAt, Label: l, Process: p})
+			es = append(es, entry{At: p.EndedAt, Kind: "exit", Label: l, Process: p})
 		case "watch_stopped":
-			es = append(es, entry{Label: "watch stopped, end unknown", Process: p})
+			es = append(es, entry{Kind: "stopped", Label: "watch stopped, end unknown", Process: p})
 		}
 	}
 	for i := range d.Denials {
-		es = append(es, entry{At: &d.Denials[i].Time, Label: "denial", Denial: &d.Denials[i]})
+		es = append(es, entry{At: &d.Denials[i].Time, Kind: "denial", Label: "denial", Denial: &d.Denials[i]})
 	}
 	sort.SliceStable(es, func(i, j int) bool {
 		a, b := es[i].At, es[j].At

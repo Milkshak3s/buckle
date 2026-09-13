@@ -1,16 +1,24 @@
 {{define "content"}}
-<p><a href="/">← Hosts</a></p>
-<h1>{{.Data.Heading}}</h1>
-{{with .Data.Session}}{{if .Key}}<p class="muted">{{.Kind}} · first seen {{ts .FirstSeen}} · last seen {{ts .LastSeen}}</p>{{end}}{{end}}
 {{$d := .Data}}
+<h1>{{with $d.Session}}Session {{if .Key}}<code>{{.Key}}</code>{{with .Kind}}<span class="tag">{{.}}</span>{{end}}{{else}}#{{.ID}} <span class="muted">(not received yet)</span>{{end}}{{else}}Untagged runs{{end}}</h1>
+{{with $d.Session}}{{if .Key}}<p class="meta">first seen {{ts .FirstSeen}} · last seen {{ts .LastSeen}}</p>{{end}}{{end}}
+<div class="stats">
+<div class="stat"><div class="k">Runs</div><div class="v">{{len $d.Runs}}</div></div>
+<div class="stat"><div class="k">Processes</div><div class="v">{{$d.ProcessTotal}}</div></div>
+<div class="stat {{denialClass $d.DenialTotal}}"><div class="k">Denials ≥</div><div class="v">{{$d.DenialTotal}}</div></div>
+{{with $d.Session}}{{if .Key}}<div class="stat"><div class="k">Active</div><div class="v">{{span .FirstSeen .LastSeen}}</div></div>{{end}}{{end}}
+</div>
+<section class="panel">
 <table>
-<tr><th>Started</th><th>Status</th><th>Kind</th><th>Command</th><th>Processes</th><th>Denials</th></tr>
-{{range .Data.Runs}}
-<tr><td><a href="/hosts/{{$d.HostUUID}}/{{$d.DBInstance}}/runs/{{.ID}}">{{ts .StartedAt}}</a></td>
-<td>{{.Status}}</td><td>{{.Kind}}</td><td><code>{{argv .CommandJSON}}</code></td>
-<td>{{.ProcessCount}}</td><td>{{.DenialCount}}</td></tr>
+<tr><th>Started</th><th>Status</th><th>Kind</th><th>Command</th><th class="n">Processes</th><th class="n">Denials</th></tr>
+{{range $d.Runs}}
+<tr><td class="t"><a href="/hosts/{{$d.HostUUID}}/{{$d.DBInstance}}/runs/{{.ID}}">{{utc .StartedAt}}</a>{{with local .StartedAt}}<small>{{.}}</small>{{end}}</td>
+<td>{{with .Status}}<span class="tag">{{.}}</span>{{end}}</td><td>{{.Kind}}</td>
+<td><code class="cmd" title="{{argv .CommandJSON}}">{{argv .CommandJSON}}</code></td>
+<td class="n">{{.ProcessCount}}</td><td class="n"><span class="cnt {{denialClass .DenialCount}}">{{.DenialCount}}</span></td></tr>
 {{else}}
-<tr><td colspan="6" class="muted">No runs.</td></tr>
+<tr><td colspan="6" class="empty">No runs.</td></tr>
 {{end}}
 </table>
+</section>
 {{end}}

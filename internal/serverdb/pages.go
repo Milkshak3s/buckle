@@ -130,6 +130,16 @@ func (d *DB) Hosts() ([]Host, error) {
 	return hosts, nil
 }
 
+// HostName returns a host's name, or "" for a host that has never reported.
+func (d *DB) HostName(uuid string) (string, error) {
+	var name string
+	err := d.DB.QueryRow(`SELECT coalesce(name, '') FROM hosts WHERE uuid = ?`, uuid).Scan(&name)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", nil
+	}
+	return name, err
+}
+
 func (d *DB) stringList(q string, args ...any) ([]string, error) {
 	rows, err := d.DB.Query(q, args...)
 	if err != nil {

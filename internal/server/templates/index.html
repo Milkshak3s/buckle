@@ -1,22 +1,25 @@
 {{define "content"}}
 <h1>Hosts</h1>
 {{range .Data}}
-{{$host := .UUID}}
-<h2>{{.Name}} <span class="muted">{{.UUID}}</span></h2>
-<p class="muted">last report {{ts .LastReport}}{{with .OSVersion}} · macOS {{.}}{{end}}</p>
+{{$host := .}}
+<section class="panel">
+<div class="ph"><span class="name">{{.Name}}</span>{{with .OSVersion}}<span class="tag">macOS {{.}}</span>{{end}}<span class="sub">{{.UUID}}</span><span class="right">last report {{ts .LastReport}}</span></div>
 {{range .Groups}}
 {{$inst := .DBInstance}}
 <table>
-<tr><th>Claude session</th><th>First seen</th><th>Last seen</th><th>Runs</th><th>Denials</th></tr>
+<tr><th>Claude session</th><th>First seen</th><th>Last seen</th><th class="n">Runs</th><th class="n">Denials</th></tr>
 {{range .Sessions}}
-<tr><td><a href="/hosts/{{$host}}/{{$inst}}/sessions/{{.ID}}"><code>{{.Key}}</code></a></td>
-<td>{{ts .FirstSeen}}</td><td>{{ts .LastSeen}}</td><td>{{.RunCount}}</td><td>{{.DenialCount}}</td></tr>
+<tr><td><a href="/hosts/{{$host.UUID}}/{{$inst}}/sessions/{{.ID}}"><code>{{.Key}}</code></a></td>
+<td class="t">{{utc .FirstSeen}}{{with local .FirstSeen}}<small>{{.}}</small>{{end}}</td>
+<td class="t">{{utc .LastSeen}}{{with local .LastSeen}}<small>{{.}}</small>{{end}}</td>
+<td class="n">{{.RunCount}}</td><td class="n"><span class="cnt {{denialClass .DenialCount}}">{{.DenialCount}}</span></td></tr>
 {{end}}
-<tr><td><a href="/hosts/{{$host}}/{{$inst}}/untagged">Untagged runs</a></td><td></td><td></td><td>{{.UntaggedRuns}}</td><td></td></tr>
+<tr class="untagged"><td><a href="/hosts/{{$host.UUID}}/{{$inst}}/untagged">Untagged runs</a></td><td></td><td></td><td class="n">{{.UntaggedRuns}}</td><td></td></tr>
 </table>
-<p class="muted">database instance {{$inst}}</p>
+<div class="foot">database instance {{$inst}}</div>
 {{end}}
+</section>
 {{else}}
-<p>No reports yet. Run <code>sudo buckle ship</code> on an endpoint.</p>
+<p class="empty">No reports yet. Run <code>sudo buckle ship</code> on an endpoint.</p>
 {{end}}
 {{end}}

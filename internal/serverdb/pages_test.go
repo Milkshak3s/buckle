@@ -40,3 +40,14 @@ func TestRunDetailWithMissingParents(t *testing.T) {
 		t.Errorf("missing run: %v, want ErrNotFound", err)
 	}
 }
+
+func TestHostName(t *testing.T) {
+	d := openTemp(t)
+	apply(t, d, batch(instA))
+	if name, err := d.HostName(hostA); err != nil || name != "mac-a" {
+		t.Errorf("HostName(known) = %q, %v; want mac-a", name, err)
+	}
+	if name, err := d.HostName("00000000-0000-4000-8000-000000000000"); err != nil || name != "" {
+		t.Errorf("HostName(unknown) = %q, %v; want empty, nil", name, err)
+	}
+}
