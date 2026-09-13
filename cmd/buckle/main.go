@@ -24,6 +24,7 @@ const version = "0.1.0-dev"
 
 const usage = `usage:
   sudo buckle watch [--buffer 5s] [--db PATH]
+  buckle migrate [--db PATH]
   buckle query sessions [filters] [--format json|jsonl|csv]
   buckle query runs     [filters] [--format json|jsonl|csv]
   buckle query run <id>           [--format json|jsonl|csv]
@@ -61,6 +62,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return 0
 	case "watch":
 		err = cmdWatch(args[1:], stderr)
+	case "migrate":
+		err = cmdMigrate(args[1:], stdout, stderr)
 	case "query":
 		err = cmdQuery(args[1:], stdout, stderr)
 	case "report":
@@ -115,6 +118,42 @@ func cmdWatch(args []string, stderr io.Writer) error {
 		OSVersion: watch.OSVersion(),
 		Stderr:    stderr,
 	})
+}
+
+func cmdMigrate(args []string, stdout, stderr io.Writer) error {
+	fs := flag.NewFlagSet("migrate", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	dbPath := fs.String("db", "", "database path")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() > 0 {
+		return usageError{"migrate takes no arguments"}
+	}
+	if os.Geteuid() == 0 {
+		return errors.New("buckle migrate must run without sudo: it upgrades your own database and must leave it owned by you")
+	}
+	path := *dbPath
+	if path == "" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return err
+		}
+		path = store.PathForHome(home)
+	}
+	inst, migrated, err := store.Migrate(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("no buckle database at %s", path)
+	}
+	if err != nil {
+		return err
+	}
+	if migrated {
+		fmt.Fprintf(stdout, "migrated %s to schema v2 (db_instance %s)\n", path, inst)
+	} else {
+		fmt.Fprintf(stdout, "%s is already schema v2 (db_instance %s)\n", path, inst)
+	}
+	return nil
 }
 
 type queryFlags struct {

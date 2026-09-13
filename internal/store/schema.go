@@ -2,18 +2,20 @@
 package store
 
 import (
+	"crypto/rand"
 	"database/sql"
 	"errors"
 	"fmt"
 	"os"
 	"strings"
+	"syscall"
+
+	"buckle/internal/wire"
 
 	_ "modernc.org/sqlite"
 )
 
-const schemaVersion = 1
-
-const schema = `
+const schemaV1 = `
 CREATE TABLE watches (
   id INTEGER PRIMARY KEY,
   started_at INTEGER NOT NULL,
@@ -118,38 +120,147 @@ CREATE INDEX IF NOT EXISTS denials_run ON denials(run_id);
 CREATE INDEX IF NOT EXISTS denials_process ON denials(process_id);
 CREATE INDEX IF NOT EXISTS orphans_watch ON orphans(watch_id);
 CREATE INDEX IF NOT EXISTS orphans_time ON orphans(time);
+CREATE INDEX IF NOT EXISTS watches_rev ON watches(rev);
+CREATE INDEX IF NOT EXISTS sessions_rev ON sessions(rev);
+CREATE INDEX IF NOT EXISTS profiles_rev ON profiles(rev);
+CREATE INDEX IF NOT EXISTS runs_rev ON runs(rev);
+CREATE INDEX IF NOT EXISTS processes_rev ON processes(rev);
+CREATE INDEX IF NOT EXISTS denials_rev ON denials(rev);
+CREATE INDEX IF NOT EXISTS orphans_rev ON orphans(rev);
 `
+
+const schemaVersion = 2
+
+var (
+	ErrNeedsMigration = errors.New("database is schema v1; run 'buckle migrate' (without sudo) first")
+	ErrNeedsSudo      = errors.New("database is in use by a root process (buckle watch/ship); re-run with sudo")
+)
+
+// revTriggers stamps rows with the next global revision on insert and on update. The WHEN guard
+// stops the trigger's own UPDATE from bumping again.
+func revTriggers(table string) string {
+	return fmt.Sprintf(`
+CREATE TRIGGER %[1]s_rev_insert AFTER INSERT ON %[1]s BEGIN
+  UPDATE rev_counter SET value = value + 1 WHERE id = 1;
+  UPDATE %[1]s SET rev = (SELECT value FROM rev_counter WHERE id = 1) WHERE rowid = NEW.rowid;
+END;
+CREATE TRIGGER %[1]s_rev_update AFTER UPDATE ON %[1]s WHEN NEW.rev = OLD.rev BEGIN
+  UPDATE rev_counter SET value = value + 1 WHERE id = 1;
+  UPDATE %[1]s SET rev = (SELECT value FROM rev_counter WHERE id = 1) WHERE rowid = NEW.rowid;
+END;`, table)
+}
+
+// upgradeV2 adds change tracking to a v1 schema inside tx: rev columns backfilled with unique
+// revisions, the counter, triggers and a random db_instance.
+func upgradeV2(tx *sql.Tx) error {
+	if _, err := tx.Exec(`CREATE TABLE rev_counter (id INTEGER PRIMARY KEY CHECK (id = 1), value INTEGER NOT NULL);
+		CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);`); err != nil {
+		return err
+	}
+	inst, err := newUUID()
+	if err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`INSERT INTO meta (key, value) VALUES ('db_instance', ?)`, inst); err != nil {
+		return err
+	}
+	var offset int64
+	for _, t := range wire.Tables {
+		if _, err := tx.Exec(`ALTER TABLE ` + t + ` ADD COLUMN rev INTEGER NOT NULL DEFAULT 0`); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(`UPDATE `+t+` SET rev = rowid + ?`, offset); err != nil {
+			return err
+		}
+		var max int64
+		if err := tx.QueryRow(`SELECT coalesce(max(rowid), 0) FROM ` + t).Scan(&max); err != nil {
+			return err
+		}
+		offset += max
+		if _, err := tx.Exec(revTriggers(t)); err != nil {
+			return err
+		}
+	}
+	_, err = tx.Exec(`INSERT INTO rev_counter (id, value) VALUES (1, ?)`, offset)
+	return err
+}
+
+func newUUID() (string, error) {
+	var b [16]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return "", err
+	}
+	b[6] = b[6]&0x0f | 0x40
+	b[8] = b[8]&0x3f | 0x80
+	return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:]), nil
+}
 
 // Store wraps the database handle.
 type Store struct {
 	DB *sql.DB
 }
 
-// Open opens (creating if needed) the database at path for writing and applies the schema.
-func Open(path string) (*Store, error) {
+func openWritable(path string) (*sql.DB, error) {
 	if strings.Contains(path, "?") {
 		return nil, fmt.Errorf("store: path must not contain '?': %s", path)
 	}
-	db, err := sql.Open("sqlite", path+"?_pragma=foreign_keys(1)&_pragma=busy_timeout(5000)&_pragma=journal_mode(DELETE)&_pragma=synchronous(NORMAL)")
+	db, err := sql.Open("sqlite", path+"?_pragma=foreign_keys(1)&_pragma=busy_timeout(5000)&_pragma=synchronous(NORMAL)")
 	if err != nil {
 		return nil, err
 	}
 	db.SetMaxOpenConns(1)
+	return db, nil
+}
+
+// Open opens (creating if needed) the database at path for writing. New databases are created at
+// schema v2; v1 databases are refused with ErrNeedsMigration.
+func Open(path string) (*Store, error) {
+	db, err := openWritable(path)
+	if err != nil {
+		return nil, err
+	}
 	s := &Store{DB: db}
-	if err := s.migrate(); err != nil {
+	if _, err := s.migrate(false); err != nil {
 		db.Close()
 		return nil, err
 	}
 	return s, nil
 }
 
-// OpenReadOnly opens an existing database for queries only.
+// Migrate upgrades an existing v1 database at path to v2. It reports the db_instance and whether
+// anything changed.
+func Migrate(path string) (string, bool, error) {
+	if _, err := os.Stat(path); err != nil {
+		return "", false, err
+	}
+	db, err := openWritable(path)
+	if err != nil {
+		return "", false, err
+	}
+	s := &Store{DB: db}
+	defer s.Close()
+	migrated, err := s.migrate(true)
+	if err != nil {
+		return "", false, err
+	}
+	inst, err := s.DBInstance()
+	return inst, migrated, err
+}
+
+// OpenReadOnly opens an existing v2 database for queries only.
 func OpenReadOnly(path string) (*Store, error) {
 	if strings.Contains(path, "?") {
 		return nil, fmt.Errorf("store: path must not contain '?': %s", path)
 	}
 	if _, err := os.Stat(path); err != nil {
 		return nil, err
+	}
+	// A WAL reader must write -shm. When root (watch/ship) created it, fail with a clear message
+	// instead of SQLite's "unable to open database file". 2 is W_OK.
+	if os.Geteuid() != 0 {
+		if err := syscall.Access(path+"-shm", 2); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return nil, fmt.Errorf("%s: %w", path, ErrNeedsSudo)
+		}
 	}
 	db, err := sql.Open("sqlite", path+"?_pragma=foreign_keys(1)&_pragma=busy_timeout(5000)&_pragma=query_only(1)")
 	if err != nil {
@@ -160,43 +271,72 @@ func OpenReadOnly(path string) (*Store, error) {
 		db.Close()
 		return nil, err
 	}
-	if v != schemaVersion {
+	switch v {
+	case schemaVersion:
+		return &Store{DB: db}, nil
+	case 1:
 		db.Close()
-		return nil, fmt.Errorf("store: %s has schema version %d, want %d", path, v, schemaVersion)
+		return nil, ErrNeedsMigration
 	}
-	return &Store{DB: db}, nil
+	db.Close()
+	return nil, fmt.Errorf("store: %s has schema version %d, want %d", path, v, schemaVersion)
 }
 
 func (s *Store) Close() error { return s.DB.Close() }
 
-func (s *Store) migrate() error {
+// DBInstance is the random id identifying this database to the report server.
+func (s *Store) DBInstance() (string, error) {
+	var v string
+	err := s.DB.QueryRow(`SELECT value FROM meta WHERE key = 'db_instance'`).Scan(&v)
+	return v, err
+}
+
+// migrate brings the schema to v2 (v1 only when allowV1) and enables WAL. It reports whether the
+// schema changed.
+func (s *Store) migrate(allowV1 bool) (bool, error) {
 	var v int
 	if err := s.DB.QueryRow(`PRAGMA user_version`).Scan(&v); err != nil {
-		return err
+		return false, err
 	}
+	changed := false
 	switch {
 	case v == schemaVersion:
-		return s.ensureIndexes()
 	case v > schemaVersion:
-		return fmt.Errorf("store: database schema version %d is newer than this buckle (%d)", v, schemaVersion)
-	case v != 0:
-		return errors.New("store: unknown schema version")
+		return false, fmt.Errorf("store: database schema version %d is newer than this buckle (%d)", v, schemaVersion)
+	case v == 1 && !allowV1:
+		return false, ErrNeedsMigration
+	case v == 0 || v == 1:
+		tx, err := s.DB.Begin()
+		if err != nil {
+			return false, err
+		}
+		defer tx.Rollback()
+		if v == 0 {
+			if _, err := tx.Exec(schemaV1); err != nil {
+				return false, fmt.Errorf("store: create schema: %w", err)
+			}
+		}
+		if err := upgradeV2(tx); err != nil {
+			return false, fmt.Errorf("store: upgrade to v2: %w", err)
+		}
+		if _, err := tx.Exec(fmt.Sprintf(`PRAGMA user_version = %d`, schemaVersion)); err != nil {
+			return false, err
+		}
+		if err := tx.Commit(); err != nil {
+			return false, err
+		}
+		changed = true
+	default:
+		return false, errors.New("store: unknown schema version")
 	}
-	tx, err := s.DB.Begin()
-	if err != nil {
-		return err
+	var mode string
+	if err := s.DB.QueryRow(`PRAGMA journal_mode=WAL`).Scan(&mode); err != nil {
+		return false, err
 	}
-	defer tx.Rollback()
-	if _, err := tx.Exec(schema); err != nil {
-		return fmt.Errorf("store: create schema: %w", err)
+	if mode != "wal" {
+		return false, fmt.Errorf("store: journal_mode is %q, want wal", mode)
 	}
-	if _, err := tx.Exec(fmt.Sprintf(`PRAGMA user_version = %d`, schemaVersion)); err != nil {
-		return err
-	}
-	if err := tx.Commit(); err != nil {
-		return err
-	}
-	return s.ensureIndexes()
+	return changed, s.ensureIndexes()
 }
 
 func (s *Store) ensureIndexes() error {
