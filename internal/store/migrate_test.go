@@ -216,6 +216,109 @@ func TestChangesSince(t *testing.T) {
 	}
 }
 
+// TestNewerSchemaVersionRefused covers spec §6: a database from a future buckle must be refused,
+// not silently treated as needing migration.
+func TestNewerSchemaVersionRefused(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "buckle.db")
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`PRAGMA user_version = 3`); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := Open(path); err == nil || errors.Is(err, ErrNeedsMigration) {
+		t.Errorf("Open v3: %v, want a plain error (not nil, not ErrNeedsMigration)", err)
+	}
+	if _, err := OpenReadOnly(path); err == nil || errors.Is(err, ErrNeedsMigration) {
+		t.Errorf("OpenReadOnly v3: %v, want a plain error (not nil, not ErrNeedsMigration)", err)
+	}
+	if _, _, err := Migrate(path); err == nil || errors.Is(err, ErrNeedsMigration) {
+		t.Errorf("Migrate v3: %v, want a plain error (not nil, not ErrNeedsMigration)", err)
+	}
+}
+
+// TestMigratedDBTriggersFire covers spec §6: the rev triggers created by upgradeV2 must fire on a
+// migrated (backfilled) database, not just a fresh v2 one.
+func TestMigratedDBTriggersFire(t *testing.T) {
+	path := createV1(t)
+	if _, _, err := Migrate(path); err != nil {
+		t.Fatal(err)
+	}
+	s, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+
+	var parts []string
+	for _, tbl := range wire.Tables {
+		parts = append(parts, "SELECT rev FROM "+tbl)
+	}
+	maxBackfill := count(t, s, `SELECT max(rev) FROM (`+strings.Join(parts, " UNION ALL ")+`)`)
+
+	if err := s.EndWatch(1, t0, "stopped"); err != nil {
+		t.Fatal(err)
+	}
+	if newRev := count(t, s, `SELECT rev FROM watches WHERE id = 1`); newRev <= maxBackfill {
+		t.Errorf("EndWatch rev on migrated DB = %d, want > backfill max %d (trigger didn't fire)", newRev, maxBackfill)
+	}
+}
+
+// TestPruneNullsChildParentRevBump covers spec §6: ON DELETE SET NULL of a child run's
+// parent_run_id must bump the child's rev so the server picks up the change.
+func TestPruneNullsChildParentRevBump(t *testing.T) {
+	s, _ := openTemp(t)
+	old := t0.Add(-31 * 24 * time.Hour)
+	recent := t0.Add(-time.Hour)
+
+	oldW, _ := s.BeginWatch(old, "14.2", time.Second)
+	newW, _ := s.BeginWatch(recent, "14.2", time.Second)
+	parent, err := s.InsertRun(Run{WatchID: oldW, Kind: "sandbox-exec", StartedAt: old, ProfileSource: "unknown"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	child, err := s.InsertRun(Run{WatchID: newW, Kind: "sandbox-exec", ParentRunID: &parent, StartedAt: recent, ProfileSource: "unknown"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cursor := int64(count(t, s, `SELECT rev FROM runs WHERE id = ?`, child))
+
+	// Cutoff deletes only the parent run: it started 31 days ago, the child only an hour ago.
+	st, err := s.Prune(t0, 30*24*time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.Runs != 1 {
+		t.Fatalf("pruned runs = %d, want 1 (the parent only)", st.Runs)
+	}
+	if n := count(t, s, `SELECT count(*) FROM runs WHERE id = ?`, child); n != 1 {
+		t.Fatalf("child run was deleted, want it kept")
+	}
+
+	rows, err := s.ChangesSince(cursor, 1000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var found bool
+	for _, row := range rows {
+		if row.Table != "runs" || row.Data["id"] != child {
+			continue
+		}
+		found = true
+		if row.Data["parent_run_id"] != nil {
+			t.Errorf("child parent_run_id = %v, want nil after parent pruned", row.Data["parent_run_id"])
+		}
+	}
+	if !found {
+		t.Errorf("ChangesSince(%d) didn't return the child run after its parent was pruned: %+v", cursor, rows)
+	}
+}
+
 func TestReadOnlyNeedsSudo(t *testing.T) {
 	if os.Geteuid() == 0 {
 		t.Skip("root can write any -shm")
