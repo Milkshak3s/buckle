@@ -168,7 +168,7 @@ func TestPIDReuseGoesToOrphan(t *testing.T) {
 	if n := h.n(`SELECT count(*) FROM orphans`); n != 0 {
 		t.Fatal("finalized before the buffer window")
 	}
-	h.tick(ms(6500))
+	h.settle(ms(6500))
 	if n := h.n(`SELECT count(*) FROM denials`); n != 0 {
 		t.Error("denial attributed to the exited image of a reused pid")
 	}
@@ -217,11 +217,11 @@ func TestDuplicateWhileBuffered(t *testing.T) {
 func TestUnseenUntaggedDropped(t *testing.T) {
 	h := newHarness(t, nil)
 	h.deny(ms(0), ms(0), 4242, "/x", "", 0)
-	h.tick(ms(4900))
+	h.settle(ms(4900))
 	if len(h.c.pendingByPID) != 1 {
 		t.Fatal("dropped before the buffer window")
 	}
-	h.tick(ms(5000))
+	h.settle(ms(5000))
 	if len(h.c.pendingByPID) != 0 {
 		t.Fatal("not finalized after the buffer window")
 	}
@@ -234,11 +234,11 @@ func TestAdoptTaggedPreexisting(t *testing.T) {
 	h := newHarness(t, nil)
 	tag := "CMD64_bHM=_END__abc_SBX"
 	h.deny(ms(0), ms(0), 777, "/x", tag, 0)
-	h.tick(ms(5000))
+	h.settle(ms(5000))
 	h.deny(ms(5100), ms(5100), 778, "/y", tag, 0)
-	h.tick(ms(10_200))
+	h.settle(ms(10_200))
 	h.deny(ms(10_300), ms(10_300), 777, "/z", "", 0) // untagged, but pid 777 is now known to the adopted run
-	h.tick(ms(15_300))
+	h.settle(ms(15_300))
 
 	if n := h.n(`SELECT count(*) FROM runs`); n != 1 {
 		t.Fatalf("runs = %d, want 1", n)
@@ -327,7 +327,7 @@ func TestCandidateNonPlatform(t *testing.T) {
 	h.fork(ms(2), tool, worker)
 	h.deny(ms(10), ms(10), 800, "/a", "", 0)
 	h.deny(ms(11), ms(11), 801, "/b", "", 0)
-	h.tick(ms(6000))
+	h.settle(ms(6000))
 
 	if n := h.n(`SELECT count(*) FROM runs WHERE kind = 'sandbox-init' AND command_json = '["/opt/x/tool","-v"]' AND profile_source = 'unknown' AND status = 'running'`); n != 1 {
 		t.Fatalf("candidate run missing")
@@ -347,7 +347,7 @@ func TestCandidateNonPlatform(t *testing.T) {
 	h.exec(ms(7001), proc(850, 8, "/bin/zsh", true), other, "/opt/x/tool")
 	h.exit(ms(7002), other, 0)
 	h.deny(ms(7002), ms(7003), 850, "/c", "", 0)
-	h.tick(ms(13_000))
+	h.settle(ms(13_000))
 	if ents.calls != 1 {
 		t.Errorf("entitlement checks = %d, want 1 (cached by cdhash)", ents.calls)
 	}
@@ -380,7 +380,7 @@ func TestCandidateExclusions(t *testing.T) {
 			h.fork(ms(0), shell, pre)
 			h.exec(ms(1), pre, bin, "/opt/app")
 			h.deny(ms(5), ms(5), 900, "/x", "", 0)
-			h.tick(ms(6000))
+			h.settle(ms(6000))
 			if n := h.n(`SELECT count(*) FROM runs`); n != c.wantRuns {
 				t.Errorf("runs = %d, want %d", n, c.wantRuns)
 			}
@@ -415,7 +415,7 @@ func TestNoCandidateBeforeBufferWindow(t *testing.T) {
 	sh := proc(1001, 5, "/bin/sh", true)
 	h.exec(ms(3), child, sbxImg, "/usr/bin/sandbox-exec", "-p", "(version 1)", "/bin/sh")
 	h.exec(ms(4), sbxImg, sh, "/bin/sh")
-	h.tick(ms(6000))
+	h.settle(ms(6000))
 	if n := h.n(`SELECT count(*) FROM runs WHERE kind = 'sandbox-init'`); n != 0 {
 		t.Error("launcher misclassified as sandbox_init candidate")
 	}

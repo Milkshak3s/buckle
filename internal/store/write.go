@@ -220,6 +220,11 @@ func (s *Store) AddDenialCount(id int64, n int) error {
 	return err
 }
 
+func (s *Store) AddOrphanCount(id int64, n int) error {
+	_, err := s.DB.Exec(`UPDATE orphans SET count = count + ? WHERE id = ?`, n, id)
+	return err
+}
+
 func (s *Store) InsertOrphan(o Orphan) (int64, error) {
 	res, err := s.DB.Exec(`INSERT INTO orphans (watch_id, time, process_name, pid, operation, target, message, count, last_path, last_pidversion)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,

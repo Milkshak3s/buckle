@@ -59,7 +59,12 @@ These were checked on macOS 14.2 (arm64, SIP on). **Re-verify all of them after 
 ### Other
 - `sandbox_check(pid, NULL, 0)` works without root on any pid. It's not needed in v1 (and would need cgo).
 - `codesign -d --entitlements - --xml <binary>` takes about 0.01–0.28s.
-- **Claude Code** (2.1.270) runs `sandbox-exec -p <profile> <shell> -c <cmd>`. The profile starts with `(version 1)`, `(deny default (with message "<TAG>"))`, and `; LogTag: <TAG>`. The tag is `CMD64_<base64(command)>_END_<suffix>`, where `<suffix>` is `_<9 random base36 chars>_SBX` and stays fixed for one Claude process.
+- **Claude Code** (2.1.270) runs `sandbox-exec -p <profile> <shell> -c <cmd>`. The profile starts with `(version 1)`, `(deny default (with message "<TAG>"))`, and `; LogTag: <TAG>`. The tag is `CMD64_<base64(payload)>_END_<suffix>`, where `<suffix>` is `_<9 random base36 chars>_SBX` and stays fixed for one Claude process.
+- **Correction (buckle live test, 2026-09-13, `claude -p` headless with `sandbox.enabled`):** the base64 payload decoded to the **tool_use ID** (`toolu_01…`), not the command. buckle's `tag_command` column therefore holds that ID. The real command is in the run's argv: `/bin/zsh -c "source <shell snapshot> && … eval '<command>' …"`. Interactive sessions are unverified. The same test found other details:
+  - The profile is about 23KB. It starts with `(deny default (with message TAG))`, and the tag repeats on each deny rule.
+  - One `sandbox-exec` run per Bash tool call. The sandbox-exec image execs `/bin/zsh`, which runs the command as child processes.
+  - Every zsh logs a tagged `mach-lookup com.apple.diagnosticd` denial, and curl logs dozens of them.
+  - Denied writes from Homebrew `python3` and `node` (non-platform) produced no log lines at all, while `touch`, `sh`/`bash` and `curl` did.
 
 ## 3. Architecture
 
@@ -94,7 +99,7 @@ buckle query / report  (unprivileged, reads SQLite)
 ### 4.3 Profile capture
 Profiles are parsed from the `sandbox-exec` exec args:
 - `-p <text>`: full profile text.
-- `-f <path>`: read the file **as soon as the exec event arrives**. If it can't be read, store the path and mark the contents missing.
+- `-f <path>`: read the file **as soon as the exec event arrives**. If it can't be read, store the path and mark the contents missing. Only regular files up to 1 MiB are read. `/dev/fd/N` and `/dev/stdin` (process substitution) are recorded as "passed by file descriptor; contents unavailable", because opening them as root would read buckle's own descriptors. Other devices and FIFOs are refused so they can't block the watcher.
 - `-n <name>`: store the name.
 - `-D key=value`: always stored.
 - Profile text is **deduplicated by hash**.
@@ -126,6 +131,8 @@ This filter never applies to sandbox-exec trees, which are tracked regardless (s
 ### 4.7 Races and unmatched denials
 The two streams arrive independently, so a denial can show up before its exec/fork event, or after the process has exited.
 - Unmatched denials wait in a **buffer** (default ~5s, configurable by flag), and matching is retried during that time.
+- A denial is decided only after **both** the buffer window has passed **and** the eslogger stream has reported events past the denial's timestamp. Otherwise a lagging eslogger would make a real sandbox-exec child look pre-existing or like a `sandbox_init` user. If eslogger stays behind for 10× the buffer, the denial is decided anyway, but only by attribution or orphaning (no adoption or candidate run), and buckle prints a warning.
+- Duplicate-report lines add to the earlier row only while the pid still refers to the same process (the same image or one it exec'd into). Otherwise they follow that pid's orphan row, or start a new denial.
 - After the window expires:
   - If the pid appeared in **any** eslogger exec/fork event during this watch, the denial goes into the **orphan** table.
   - Otherwise it is dropped (system noise).

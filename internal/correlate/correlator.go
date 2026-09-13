@@ -6,7 +6,6 @@ package correlate
 
 import (
 	"fmt"
-	"os"
 	"path/filepath"
 	"sort"
 	"time"
@@ -28,6 +27,7 @@ type Sink interface {
 	InsertDenial(d store.Denial) (int64, error)
 	AddDenialCount(id int64, n int) error
 	InsertOrphan(o store.Orphan) (int64, error)
+	AddOrphanCount(id int64, n int) error
 }
 
 // EntitlementChecker reports whether a binary has the App Sandbox entitlement.
@@ -42,7 +42,7 @@ type Config struct {
 }
 
 type Deps struct {
-	ReadFile     func(string) ([]byte, error) // default os.ReadFile
+	ReadFile     func(string) ([]byte, error) // default readProfileFile
 	Entitlements EntitlementChecker           // nil disables sandbox_init candidates
 	Warn         func(string)                 // default: discard
 }
@@ -58,6 +58,9 @@ const (
 	timeSlack = 5 * time.Millisecond
 	// minRetention is how long ended process images stay resolvable.
 	minRetention = 30 * time.Second
+	// lagCapFactor × Buffer is how long a denial waits for a lagging eslogger stream before it is
+	// finalized without the classifications that need complete process events.
+	lagCapFactor = 10
 )
 
 // image is one process image (audit token).
@@ -75,6 +78,7 @@ type image struct {
 	exitStatus *int
 	run        *run
 	rowID      int64
+	denialKeys []denialKey // lastStored keys that pointed at this image, released on eviction
 }
 
 type run struct {
@@ -95,6 +99,16 @@ type pending struct {
 	d       ulog.Denial
 	count   int
 	arrived time.Time
+}
+
+// storedDenial and orphanRef let duplicate-report lines find the row of the denial they repeat.
+type storedDenial struct {
+	id  int64
+	img *image
+}
+
+type orphanRef struct {
+	id int64
 }
 
 type seenInfo struct {
@@ -119,14 +133,16 @@ type Correlator struct {
 
 	pendingByPID map[int][]*pending
 	lastPending  map[denialKey]*pending
-	lastStored   map[denialKey]int64
+	lastStored   map[denialKey]storedDenial
+	lastOrphan   map[denialKey]orphanRef
+	orphanKeys   map[int][]denialKey // lastOrphan keys by pid, dropped when the pid's process changes
 
 	entCache map[string]bool
 }
 
 func New(cfg Config, sink Sink, deps Deps) *Correlator {
 	if deps.ReadFile == nil {
-		deps.ReadFile = os.ReadFile
+		deps.ReadFile = readProfileFile
 	}
 	if deps.Warn == nil {
 		deps.Warn = func(string) {}
@@ -141,7 +157,9 @@ func New(cfg Config, sink Sink, deps Deps) *Correlator {
 		adopted:      map[string]*run{},
 		pendingByPID: map[int][]*pending{},
 		lastPending:  map[denialKey]*pending{},
-		lastStored:   map[denialKey]int64{},
+		lastStored:   map[denialKey]storedDenial{},
+		lastOrphan:   map[denialKey]orphanRef{},
+		orphanKeys:   map[int][]denialKey{},
 		entCache:     map[string]bool{},
 	}
 }
@@ -287,7 +305,29 @@ func (c *Correlator) register(img *image) {
 }
 
 func (c *Correlator) markSeen(p eslog.Proc) {
-	c.seen[p.Token.PID] = seenInfo{path: p.Path, pidversion: p.Token.PIDVersion}
+	pid := p.Token.PID
+	if prev, ok := c.seen[pid]; ok && prev.pidversion != p.Token.PIDVersion {
+		for _, k := range c.orphanKeys[pid] {
+			delete(c.lastOrphan, k)
+		}
+		delete(c.orphanKeys, pid)
+	}
+	c.seen[pid] = seenInfo{path: p.Path, pidversion: p.Token.PIDVersion}
+}
+
+// isCurrent reports whether img is still the process its pid refers to: the newest known image
+// for the pid is img itself or one img exec'd into.
+func (c *Correlator) isCurrent(img *image) bool {
+	list := c.byPID[img.proc.Token.PID]
+	if len(list) == 0 {
+		return false
+	}
+	for cur := list[len(list)-1]; cur != nil; cur = cur.prev {
+		if cur == img {
+			return true
+		}
+	}
+	return false
 }
 
 // join adds img to r and writes its process row.
@@ -393,8 +433,11 @@ func (c *Correlator) HandleDenial(d ulog.Denial, now time.Time) error {
 			p.count += d.Duplicate
 			return nil
 		}
-		if id, ok := c.lastStored[key]; ok {
-			return c.sink.AddDenialCount(id, d.Duplicate)
+		if sd, ok := c.lastStored[key]; ok && c.isCurrent(sd.img) {
+			return c.sink.AddDenialCount(sd.id, d.Duplicate)
+		}
+		if o, ok := c.lastOrphan[key]; ok {
+			return c.sink.AddOrphanCount(o.id, d.Duplicate)
 		}
 		count = d.Duplicate
 	}
@@ -430,7 +473,10 @@ func (c *Correlator) attribute(p *pending, img *image) error {
 		return err
 	}
 	key := denialKey{d.PID, d.Operation, d.Target}
-	c.lastStored[key] = id
+	if prev, ok := c.lastStored[key]; !ok || prev.img != img {
+		img.denialKeys = append(img.denialKeys, key)
+	}
+	c.lastStored[key] = storedDenial{id: id, img: img}
 	if c.lastPending[key] == p {
 		delete(c.lastPending, key)
 	}
@@ -464,16 +510,29 @@ func (c *Correlator) setPending(pid int, list []*pending) {
 
 // Tick retries buffered denials the eslogger stream has caught up with, finalizes those older
 // than the buffer window, and evicts old ended images.
+//
+// A denial is finalized only once both the buffer window is over and eslogger has passed the
+// denial's time; judging it earlier would misread a lagging stream's missing exec events as
+// "pre-existing" or "sandbox_init". If eslogger stays behind for lagCapFactor × Buffer, the
+// denial is finalized without those classifications.
 func (c *Correlator) Tick(now time.Time) error {
 	for pid, list := range c.pendingByPID {
 		kept := list[:0]
 		for _, p := range list {
+			waited := now.Sub(p.arrived)
+			caught := c.caughtUp(p.d.Time)
 			switch {
-			case now.Sub(p.arrived) >= c.cfg.Buffer:
-				if err := c.finalize(p); err != nil {
+			case caught && waited >= c.cfg.Buffer:
+				if err := c.finalize(p, true); err != nil {
 					return err
 				}
-			case c.caughtUp(p.d.Time):
+			case waited >= lagCapFactor*c.cfg.Buffer:
+				c.deps.Warn(fmt.Sprintf("eslogger is more than %s behind the Sandbox log; recording denials without its process events (no adoption or sandbox_init classification)",
+					lagCapFactor*c.cfg.Buffer))
+				if err := c.finalize(p, false); err != nil {
+					return err
+				}
+			case caught:
 				img := c.resolve(pid, p.d.Time)
 				if img == nil || img.run == nil {
 					kept = append(kept, p)
@@ -494,7 +553,8 @@ func (c *Correlator) Tick(now time.Time) error {
 
 // finalize decides the fate of a denial whose buffer window is over:
 // attribute, adopt (Claude tag), sandbox_init candidate, orphan, or drop.
-func (c *Correlator) finalize(p *pending) error {
+// classify is false when process events may be incomplete; then only attribution and orphaning apply.
+func (c *Correlator) finalize(p *pending, classify bool) error {
 	d := p.d
 	key := denialKey{d.PID, d.Operation, d.Target}
 	if c.lastPending[key] == p {
@@ -504,7 +564,7 @@ func (c *Correlator) finalize(p *pending) error {
 	if img != nil && img.run != nil {
 		return c.attribute(p, img)
 	}
-	if tag, ok := sbx.FindTag(d.Message); ok {
+	if tag, ok := sbx.FindTag(d.Message); ok && classify {
 		r, err := c.adopt(tag, d)
 		if err != nil {
 			return err
@@ -518,7 +578,7 @@ func (c *Correlator) finalize(p *pending) error {
 		}
 		return c.attribute(p, img)
 	}
-	if img != nil && c.deps.Entitlements != nil {
+	if img != nil && classify && c.deps.Entitlements != nil {
 		r, err := c.candidateRun(img)
 		if err != nil {
 			return err
@@ -529,7 +589,7 @@ func (c *Correlator) finalize(p *pending) error {
 	}
 	if s, ok := c.seen[d.PID]; ok {
 		pv := s.pidversion
-		_, err := c.sink.InsertOrphan(store.Orphan{
+		id, err := c.sink.InsertOrphan(store.Orphan{
 			WatchID:        c.cfg.WatchID,
 			Time:           d.Time,
 			ProcessName:    d.Name,
@@ -541,7 +601,13 @@ func (c *Correlator) finalize(p *pending) error {
 			LastPath:       s.path,
 			LastPIDVersion: &pv,
 		})
-		return err
+		if err != nil {
+			return err
+		}
+		if _, ok := c.lastOrphan[key]; !ok {
+			c.orphanKeys[d.PID] = append(c.orphanKeys[d.PID], key)
+		}
+		c.lastOrphan[key] = orphanRef{id: id}
 	}
 	return nil
 }
@@ -589,6 +655,12 @@ func (c *Correlator) evict(now time.Time) {
 		for _, img := range list {
 			if img.end == nil || !img.end.Before(cutoff) {
 				kept = append(kept, img)
+				continue
+			}
+			for _, k := range img.denialKeys {
+				if c.lastStored[k].img == img {
+					delete(c.lastStored, k)
+				}
 			}
 		}
 		if len(kept) == 0 {
@@ -603,7 +675,8 @@ func (c *Correlator) evict(now time.Time) {
 func (c *Correlator) Shutdown(now time.Time) error {
 	for pid, list := range c.pendingByPID {
 		for _, p := range list {
-			if err := c.finalize(p); err != nil {
+			// The watcher drains both sources before shutting down, so process events are complete.
+			if err := c.finalize(p, true); err != nil {
 				return err
 			}
 		}

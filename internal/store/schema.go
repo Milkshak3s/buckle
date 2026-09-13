@@ -56,8 +56,6 @@ CREATE TABLE runs (
   command_json TEXT NOT NULL DEFAULT '[]',
   cwd TEXT
 );
-CREATE INDEX runs_started ON runs(started_at);
-CREATE INDEX runs_session ON runs(session_id);
 CREATE TABLE processes (
   id INTEGER PRIMARY KEY,
   run_id INTEGER NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
@@ -77,7 +75,6 @@ CREATE TABLE processes (
   end_reason TEXT CHECK (end_reason IN ('exit', 'exec', 'watch_stopped')),
   exit_status INTEGER
 );
-CREATE INDEX processes_run ON processes(run_id);
 CREATE TABLE denials (
   id INTEGER PRIMARY KEY,
   run_id INTEGER NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
@@ -90,8 +87,6 @@ CREATE TABLE denials (
   message TEXT,
   count INTEGER NOT NULL
 );
-CREATE INDEX denials_run ON denials(run_id);
-CREATE INDEX denials_process ON denials(process_id);
 CREATE TABLE orphans (
   id INTEGER PRIMARY KEY,
   watch_id INTEGER NOT NULL REFERENCES watches(id),
@@ -105,6 +100,24 @@ CREATE TABLE orphans (
   last_path TEXT,
   last_pidversion INTEGER
 );
+`
+
+// indexes are applied on every writable open so existing databases pick up new ones. Every
+// foreign-key child column is indexed: with foreign_keys on, deleting a parent row otherwise scans
+// the child table once per referencing column, which made pruning quadratic.
+const indexes = `
+CREATE INDEX IF NOT EXISTS runs_started ON runs(started_at);
+CREATE INDEX IF NOT EXISTS runs_watch ON runs(watch_id);
+CREATE INDEX IF NOT EXISTS runs_parent ON runs(parent_run_id);
+CREATE INDEX IF NOT EXISTS runs_session ON runs(session_id);
+CREATE INDEX IF NOT EXISTS runs_profile ON runs(profile_hash);
+CREATE INDEX IF NOT EXISTS processes_run ON processes(run_id);
+CREATE INDEX IF NOT EXISTS processes_parent ON processes(parent_process_id);
+CREATE INDEX IF NOT EXISTS processes_exec_prev ON processes(exec_prev_process_id);
+CREATE INDEX IF NOT EXISTS denials_run ON denials(run_id);
+CREATE INDEX IF NOT EXISTS denials_process ON denials(process_id);
+CREATE INDEX IF NOT EXISTS orphans_watch ON orphans(watch_id);
+CREATE INDEX IF NOT EXISTS orphans_time ON orphans(time);
 `
 
 // Store wraps the database handle.
@@ -163,7 +176,7 @@ func (s *Store) migrate() error {
 	}
 	switch {
 	case v == schemaVersion:
-		return nil
+		return s.ensureIndexes()
 	case v > schemaVersion:
 		return fmt.Errorf("store: database schema version %d is newer than this buckle (%d)", v, schemaVersion)
 	case v != 0:
@@ -180,5 +193,15 @@ func (s *Store) migrate() error {
 	if _, err := tx.Exec(fmt.Sprintf(`PRAGMA user_version = %d`, schemaVersion)); err != nil {
 		return err
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	return s.ensureIndexes()
+}
+
+func (s *Store) ensureIndexes() error {
+	if _, err := s.DB.Exec(indexes); err != nil {
+		return fmt.Errorf("store: create indexes: %w", err)
+	}
+	return nil
 }
