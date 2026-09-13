@@ -1,0 +1,11 @@
+2026-09-13T10:08:35.700368 preexisting: start (before sources)
+2026-09-13T10:08:38.727066 sources started es=15485 log=15486
+2026-09-13T10:08:38.739751 p_single: sandbox-exec -p, cat denied /private/etc/hosts
+2026-09-13T10:08:38.789011 f_param: sandbox-exec -f file -D OUT=/private/tmp, touch denied
+2026-09-13T10:08:38.827078 f_unreadable: sandbox-exec -f on a root-only file (as root), then file removed
+2026-09-13T10:08:38.857064 n_named: sandbox-exec -n no-network curl
+2026-09-13T10:08:38.910825 tagged_tree: Claude-style tagged profile, sh -> cat|head + background cat
+2026-09-13T10:08:38.948873 dup: one sh pid reads /etc/hosts 40 times (duplicate reports)
+2026-09-13T10:08:38.987113 sbinit: non-platform binary calling sandbox_init(no-write)
+2026-09-13T10:08:41.758208 preexisting: exited
+2026-09-13T10:08:46.801811 stopping sources
