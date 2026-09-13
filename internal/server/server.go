@@ -56,6 +56,3 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 func writeError(w http.ResponseWriter, status int, msg string) {
 	writeJSON(w, status, wire.ErrorResponse{Error: msg})
 }
-
-// routes registers the review pages (Task 5).
-func (s *server) routes(mux *http.ServeMux) {}

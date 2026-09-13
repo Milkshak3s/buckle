@@ -1,0 +1,21 @@
+{{define "layout"}}<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+{{if .Refresh}}<meta http-equiv="refresh" content="{{.Refresh}}">{{end}}
+<title>{{.Title}} · buckle</title>
+<style>
+body{font:14px/1.45 -apple-system,BlinkMacSystemFont,sans-serif;margin:0 auto;max-width:76rem;padding:1rem 1.5rem;color:#1d1d1f}
+a{color:#0a58ca;text-decoration:none}a:hover{text-decoration:underline}
+h1{font-size:1.4rem}h2{font-size:1.1rem;margin-top:2rem}
+table{border-collapse:collapse;width:100%;margin:.5rem 0 1.5rem}
+th,td{text-align:left;padding:.3rem .5rem;border-bottom:1px solid #e5e5e5;vertical-align:top}
+th{font-weight:600;color:#555;white-space:nowrap}
+code,pre{font:12px/1.4 ui-monospace,Menlo,monospace;word-break:break-all}
+pre{background:#f6f6f6;padding:.75rem;white-space:pre-wrap}
+.muted{color:#777}.note{color:#8a5a00}
+.badge{font-size:11px;padding:0 .35rem;border-radius:3px;background:#e8f0fe;color:#1a4fa0;white-space:nowrap}
+.badge.np{background:#fdecea;color:#a1260d}
+tr.deny td{background:#fff8ec}
+</style></head><body>
+<header><a href="/"><strong>buckle</strong></a> <span class="muted">sandboxed session review</span></header>
+{{template "content" .}}
+</body></html>{{end}}

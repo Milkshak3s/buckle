@@ -1,0 +1,22 @@
+{{define "content"}}
+<h1>Hosts</h1>
+{{range .Data}}
+{{$host := .UUID}}
+<h2>{{.Name}} <span class="muted">{{.UUID}}</span></h2>
+<p class="muted">last report {{ts .LastReport}}{{with .OSVersion}} · macOS {{.}}{{end}}</p>
+{{range .Groups}}
+{{$inst := .DBInstance}}
+<table>
+<tr><th>Claude session</th><th>First seen</th><th>Last seen</th><th>Runs</th><th>Denials</th></tr>
+{{range .Sessions}}
+<tr><td><a href="/hosts/{{$host}}/{{$inst}}/sessions/{{.ID}}"><code>{{.Key}}</code></a></td>
+<td>{{ts .FirstSeen}}</td><td>{{ts .LastSeen}}</td><td>{{.RunCount}}</td><td>{{.DenialCount}}</td></tr>
+{{end}}
+<tr><td><a href="/hosts/{{$host}}/{{$inst}}/untagged">Untagged runs</a></td><td></td><td></td><td>{{.UntaggedRuns}}</td><td></td></tr>
+</table>
+<p class="muted">database instance {{$inst}}</p>
+{{end}}
+{{else}}
+<p>No reports yet. Run <code>sudo buckle ship</code> on an endpoint.</p>
+{{end}}
+{{end}}
