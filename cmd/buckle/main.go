@@ -21,6 +21,7 @@ import (
 	"buckle/internal/report"
 	"buckle/internal/server"
 	"buckle/internal/serverdb"
+	"buckle/internal/ship"
 	"buckle/internal/store"
 	"buckle/internal/watch"
 )
@@ -31,6 +32,7 @@ const usage = `usage:
   sudo buckle watch [--buffer 5s] [--db PATH]
   buckle migrate [--db PATH]
   buckle serve [--addr 127.0.0.1:8080] [--db PATH] [--refresh 10s]
+  sudo buckle ship [--server http://127.0.0.1:8080] [--interval 10s] [--db PATH]
   buckle query sessions [filters] [--format json|jsonl|csv]
   buckle query runs     [filters] [--format json|jsonl|csv]
   buckle query run <id>           [--format json|jsonl|csv]
@@ -72,6 +74,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 		err = cmdMigrate(args[1:], stdout, stderr)
 	case "serve":
 		err = cmdServe(args[1:], stderr)
+	case "ship":
+		err = cmdShip(args[1:], stderr)
 	case "query":
 		err = cmdQuery(args[1:], stdout, stderr)
 	case "report":
@@ -109,7 +113,7 @@ func cmdWatch(args []string, stderr io.Writer) error {
 	if fs.NArg() > 0 {
 		return usageError{"watch takes no arguments"}
 	}
-	owner, err := watch.SudoOwner()
+	owner, err := watch.SudoOwner("watch", "eslogger needs root")
 	if err != nil {
 		return err
 	}
@@ -226,6 +230,56 @@ func cmdServe(args []string, stderr io.Writer) error {
 		return err
 	}
 	return nil
+}
+
+func cmdShip(args []string, stderr io.Writer) error {
+	fs := flag.NewFlagSet("ship", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	serverURL := fs.String("server", "http://127.0.0.1:8080", "buckle serve base URL")
+	interval := fs.Duration("interval", 10*time.Second, "time between shipments")
+	dbPath := fs.String("db", "", "database path")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() > 0 {
+		return usageError{"ship takes no arguments"}
+	}
+	if *interval <= 0 {
+		return usageError{"--interval must be positive"}
+	}
+	owner, err := watch.SudoOwner("ship", "the database's WAL files are root-owned while buckle watch runs")
+	if err != nil {
+		return err
+	}
+	path := *dbPath
+	if path == "" {
+		path = store.PathForHome(owner.Home)
+	}
+	s, err := store.OpenReadOnly(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("no buckle database at %s; run `sudo buckle watch` first", path)
+	}
+	if err != nil {
+		return err
+	}
+	defer s.Close()
+	inst, err := s.DBInstance()
+	if err != nil {
+		return fmt.Errorf("read db_instance: %w", err)
+	}
+	host, err := ship.HostIdentity()
+	if err != nil {
+		return fmt.Errorf("host identity: %w", err)
+	}
+	logf := func(format string, a ...any) { fmt.Fprintf(stderr, "buckle: "+format+"\n", a...) }
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+	base := strings.TrimRight(*serverURL, "/")
+	logf("shipping %s (host %s %s, db_instance %s) to %s every %s", path, host.Name, host.UUID, inst, base, *interval)
+	return ship.Run(ctx, ship.Options{
+		Store: s, Host: host, DBInstance: inst, Server: base, Interval: *interval,
+		Client: &http.Client{Timeout: 30 * time.Second}, Logf: logf,
+	})
 }
 
 type queryFlags struct {

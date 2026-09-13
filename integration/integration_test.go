@@ -70,7 +70,7 @@ func workload(t *testing.T, owner *watch.Owner, name string, args ...string) {
 }
 
 func TestWatchEndToEnd(t *testing.T) {
-	owner, err := watch.SudoOwner()
+	owner, err := watch.SudoOwner("watch", "eslogger needs root")
 	if err != nil {
 		t.Skipf("needs sudo: %v", err)
 	}

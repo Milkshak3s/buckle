@@ -42,10 +42,10 @@ type Owner struct {
 }
 
 // SudoOwner resolves the user who invoked sudo. It fails unless running as root under sudo.
-func SudoOwner() (*Owner, error) {
+func SudoOwner(command, reason string) (*Owner, error) {
 	name := os.Getenv("SUDO_USER")
 	if os.Geteuid() != 0 || name == "" || name == "root" {
-		return nil, errors.New("buckle watch must be run with sudo from your user account (eslogger needs root)")
+		return nil, fmt.Errorf("buckle %s must be run with sudo from your user account (%s)", command, reason)
 	}
 	u, err := user.Lookup(name)
 	if err != nil {
