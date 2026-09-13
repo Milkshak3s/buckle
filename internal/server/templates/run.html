@@ -23,7 +23,7 @@
 <p class="note">{{.Data.Note}}</p>
 <table>
 <tr><th>Offset</th><th>Time</th><th>Event</th><th>Detail</th></tr>
-{{range .Data.Timeline}}
+{{range $e := .Data.Timeline}}
 <tr{{if .Denial}} class="deny"{{end}}>
 <td><code>{{offset $r.StartedAt .At}}</code></td>
 <td>{{ts .At}}</td>
@@ -31,8 +31,8 @@
 <td>
 {{with .Denial}}<code>{{.Operation}}</code> <code>{{.Target}}</code> ×{{.Count}} · {{.ProcessName}}({{.PID}}) {{platform .IsPlatform}}
 {{if and .Message (ne .Message $r.Tag)}}<br><span class="muted">{{.Message}}</span>{{end}}{{end}}
-{{with .Process}}pid {{.PID}}{{with .PIDVersion}}/{{deref .}}{{end}} <code>{{.Path}}</code> {{platform .IsPlatform}}{{end}}
-{{if .ShowArgs}}<br><code>{{argv .Process.ArgsJSON}}</code>{{with .Process.SigningID}} <span class="muted">{{.}}</span>{{end}}{{with .Process.TeamID}} <span class="muted">team {{.}}</span>{{end}}{{end}}
+{{with .Process}}pid {{.PID}}{{with .PIDVersion}}/{{deref .}}{{end}} <code>{{.Path}}</code> {{platform .IsPlatform}}{{if $e.Args}}{{with .SigningID}} <span class="muted">{{.}}</span>{{end}}{{with .TeamID}} <span class="muted">team {{.}}</span>{{end}}{{end}}{{end}}
+{{with .Args}}<br><code>{{.Text}}</code>{{if .Full}}<details class="args"><summary>full arguments</summary><pre>{{.Full}}</pre></details>{{end}}{{end}}
 </td>
 </tr>
 {{else}}

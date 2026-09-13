@@ -13,8 +13,10 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"buckle/internal/report"
+	"buckle/internal/sbx"
 	"buckle/internal/serverdb"
 )
 
@@ -42,11 +44,11 @@ type runPage struct {
 
 // entry is one timeline row: a process start or end, or a denial.
 type entry struct {
-	At       *int64
-	Label    string
-	Process  *serverdb.Process
-	Denial   *serverdb.Denial
-	ShowArgs bool
+	At      *int64
+	Label   string
+	Process *serverdb.Process
+	Denial  *serverdb.Denial
+	Args    *argsView // process starts only
 }
 
 func (s *server) routes(mux *http.ServeMux) {
@@ -58,6 +60,19 @@ func (s *server) routes(mux *http.ServeMux) {
 
 var safeArg = regexp.MustCompile(`^[A-Za-z0-9_@%+=:,./-]+$`)
 
+// Timeline arguments longer than argLimit bytes show only their first argHead bytes.
+const (
+	argLimit = 1024
+	argHead  = 200
+)
+
+func quoteArg(a string) string {
+	if safeArg.MatchString(a) {
+		return a
+	}
+	return "'" + strings.ReplaceAll(a, "'", `'\''`) + "'"
+}
+
 // argv renders a stored JSON argv as a shell-quoted command line.
 func argv(js string) string {
 	var args []string
@@ -66,13 +81,56 @@ func argv(js string) string {
 	}
 	q := make([]string, len(args))
 	for i, a := range args {
-		if safeArg.MatchString(a) {
-			q[i] = a
-		} else {
-			q[i] = "'" + strings.ReplaceAll(a, "'", `'\''`) + "'"
-		}
+		q[i] = quoteArg(a)
 	}
 	return strings.Join(q, " ")
+}
+
+// argsView is a process argv prepared for the timeline.
+type argsView struct {
+	Text string // shell-quoted, with an inline sandbox profile and very long arguments elided
+	Full string // the complete shell-quoted argv; set only when Text elides something
+}
+
+// newArgsView shortens an argv for reading. sandbox-exec's inline profile (-p), which the run
+// page already shows under Profile text, becomes a placeholder, and any other argument over
+// argLimit bytes keeps only its first argHead bytes.
+func newArgsView(path, js string) *argsView {
+	var args []string
+	if err := json.Unmarshal([]byte(js), &args); err != nil {
+		return &argsView{Text: js}
+	}
+	var inline string
+	if path == sbx.SandboxExecPath {
+		inline = sbx.ParseArgs(args).Inline
+	}
+	q := make([]string, len(args))
+	elided := false
+	for i, a := range args {
+		switch {
+		case inline != "" && strings.HasSuffix(a, inline) && (a == inline || strings.HasPrefix(a, "-")):
+			// Detached (-p PROFILE) or attached (-pPROFILE) profile value.
+			if opt := strings.TrimSuffix(a, inline); opt != "" {
+				q[i] = quoteArg(opt)
+			}
+			q[i] += fmt.Sprintf("<inline profile, %d bytes: see Profile text>", len(inline))
+			elided = true
+		case len(a) > argLimit:
+			cut := argHead
+			for cut > 0 && !utf8.RuneStart(a[cut]) {
+				cut--
+			}
+			q[i] = quoteArg(a[:cut]) + fmt.Sprintf("…<%d more bytes>", len(a)-cut)
+			elided = true
+		default:
+			q[i] = quoteArg(a)
+		}
+	}
+	v := &argsView{Text: strings.Join(q, " ")}
+	if elided {
+		v.Full = argv(js)
+	}
+	return v
 }
 
 func nsOf(v any) (int64, bool) {
@@ -219,7 +277,7 @@ func timeline(d serverdb.RunDetail) []entry {
 		case p.ParentProcessID != nil:
 			label = "fork"
 		}
-		es = append(es, entry{At: p.StartedAt, Label: label, Process: p, ShowArgs: true})
+		es = append(es, entry{At: p.StartedAt, Label: label, Process: p, Args: newArgsView(p.Path, p.ArgsJSON)})
 		switch p.EndReason {
 		case "exit":
 			l := "exit"
