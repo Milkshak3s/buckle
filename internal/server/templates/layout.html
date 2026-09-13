@@ -21,6 +21,17 @@ tr.fork td{background:#f4f4f5;color:#8e8e93;font-size:12px;padding-top:.1rem;pad
 tr.fork code{color:#8e8e93}tr.fork .badge{opacity:.6}tr.fork .args summary{font-size:11px}
 tr.exec td{background:#e8f6ee}tr.exec td:first-child{box-shadow:inset 3px 0 #1f9d55}
 tr.exec td:nth-child(3){color:#17693a;font-weight:600}
+ul.tree,ul.tree ul{list-style:none;margin:0;padding:0}
+ul.tree{margin:.5rem 0 1rem}
+ul.tree ul{margin-left:.5rem;padding-left:.75rem;border-left:1px solid #ddd}
+ul.tree li{margin:.25rem 0}ul.tree li.collapsed>ul{display:none}
+.tree .twisty{display:inline-block;width:1rem;padding:0;border:0;background:none;color:#555;font:inherit;cursor:pointer}
+.tree .twisty[hidden]{visibility:hidden}
+.tree .off{color:#777}.tree .chain{font-weight:600}
+.tree .node.fork,.tree .node.fork code{color:#8e8e93;font-size:12px}.tree .node.fork .chain{font-weight:normal}
+.badge.fork{background:#f4f4f5;color:#8e8e93}
+.tree .argline{display:block;margin-left:1rem;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.tree .images{margin-left:1rem}.tree .images table{margin:.25rem 0 .5rem}
 </style></head><body>
 <header><a href="/"><strong>buckle</strong></a> <span class="muted">sandboxed session review</span></header>
 {{template "content" .}}

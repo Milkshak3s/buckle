@@ -19,6 +19,37 @@
 {{if $r.ProfileText}}<details><summary>Profile text ({{len $r.ProfileText}} bytes)</summary><pre>{{$r.ProfileText}}</pre></details>
 {{else if $r.ProfileMissing}}<p class="muted">Profile text not received yet.</p>{{end}}
 
+{{with .Data.Tree.Root}}
+<h2>Process tree</h2>
+<p class="tree-controls" hidden><button type="button" data-tree="expand">Expand all</button> <button type="button" data-tree="collapse">Collapse all</button></p>
+<ul class="tree">{{template "tree-node" (treeNode . $r.StartedAt)}}</ul>
+{{with $.Data.Tree.Unrecorded}}<p class="muted">Parent not recorded</p>
+<ul class="tree">{{range .}}{{template "tree-node" (treeNode . $r.StartedAt)}}{{end}}</ul>{{end}}
+<script>
+(function () {
+  document.querySelectorAll(".tree-controls, .tree .twisty[hidden]").forEach(function (e) { e.hidden = false; });
+  function set(li, open) {
+    li.classList.toggle("collapsed", !open);
+    var b = li.querySelector(":scope > .node > .twisty");
+    b.setAttribute("aria-expanded", open);
+    b.textContent = open ? "▾" : "▸";
+  }
+  document.addEventListener("click", function (ev) {
+    var b = ev.target.closest(".tree button.twisty");
+    if (b) {
+      var li = b.closest("li");
+      set(li, li.classList.contains("collapsed"));
+      return;
+    }
+    var c = ev.target.closest("[data-tree]");
+    if (c) {
+      document.querySelectorAll(".tree li.has-children").forEach(function (li) { set(li, c.dataset.tree === "expand"); });
+    }
+  });
+})();
+</script>
+{{end}}
+
 <h2>Timeline</h2>
 <p class="note">{{.Data.Note}}</p>
 <table>
@@ -40,4 +71,27 @@
 <tr><td colspan="4" class="muted">No process events or denials recorded.</td></tr>
 {{end}}
 </table>
+{{end}}
+
+{{define "tree-node"}}{{$n := .N}}{{$start := .Start}}{{$first := (index $n.Images 0).Process}}
+<li{{if $n.Children}} class="has-children"{{end}}>
+<div class="node{{if $n.ForkOnly}} fork{{end}}">
+{{if $n.Children}}<button type="button" class="twisty" aria-expanded="true" hidden>▾</button>{{else}}<span class="twisty"></span>{{end}}
+<code class="off">{{offset $start $first.StartedAt}}</code>
+pid {{$first.PID}}
+<code class="chain">{{range $i, $im := $n.Images}}{{if $i}} → {{end}}{{$im.Process.Path}}{{end}}</code>
+{{if $n.ForkOnly}}<span class="badge fork">fork, no exec</span>{{end}}
+{{if $n.Denials}}<span class="badge np">denials ×{{$n.Denials}}</span>{{end}}
+<span class="muted">{{$n.End}}</span>
+<code class="argline muted" title="{{$n.Args.Text}}">{{$n.Args.Text}}</code>
+<details class="args images"><summary>images ({{len $n.Images}})</summary>
+<table>
+{{range $n.Images}}<tr><td><code>{{offset $start .Process.StartedAt}}</code></td>
+<td>pid {{.Process.PID}}{{with .Process.PIDVersion}}/{{deref .}}{{end}} <code>{{.Process.Path}}</code>{{with .Process.SigningID}} <span class="muted">{{.}}</span>{{end}}
+<br><code>{{.Args.Text}}</code>{{if .Args.Full}}<details class="args"><summary>full arguments</summary><pre>{{.Args.Full}}</pre></details>{{end}}</td></tr>
+{{end}}</table>
+</details>
+</div>
+{{with $n.Children}}<ul>{{range .}}{{template "tree-node" (treeNode . $start)}}{{end}}</ul>{{end}}
+</li>
 {{end}}
