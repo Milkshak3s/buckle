@@ -24,7 +24,7 @@
 <table>
 <tr><th>Offset</th><th>Time</th><th>Event</th><th>Detail</th></tr>
 {{range $e := .Data.Timeline}}
-<tr{{if .Denial}} class="deny"{{end}}>
+<tr{{if .Denial}} class="deny"{{else if eq .Label "fork"}} class="fork"{{else if eq .Label "exec"}} class="exec"{{end}}>
 <td><code>{{offset $r.StartedAt .At}}</code></td>
 <td>{{ts .At}}</td>
 <td>{{.Label}}</td>
@@ -32,7 +32,8 @@
 {{with .Denial}}<code>{{.Operation}}</code> <code>{{.Target}}</code> ×{{.Count}} · {{.ProcessName}}({{.PID}}) {{platform .IsPlatform}}
 {{if and .Message (ne .Message $r.Tag)}}<br><span class="muted">{{.Message}}</span>{{end}}{{end}}
 {{with .Process}}pid {{.PID}}{{with .PIDVersion}}/{{deref .}}{{end}} <code>{{.Path}}</code> {{platform .IsPlatform}}{{if $e.Args}}{{with .SigningID}} <span class="muted">{{.}}</span>{{end}}{{with .TeamID}} <span class="muted">team {{.}}</span>{{end}}{{end}}{{end}}
-{{with .Args}}<br><code>{{.Text}}</code>{{if .Full}}<details class="args"><summary>full arguments</summary><pre>{{.Full}}</pre></details>{{end}}{{end}}
+{{with .Args}}{{if eq $e.Label "fork"}}<details class="args"><summary>arguments</summary><pre>{{if .Full}}{{.Full}}{{else}}{{.Text}}{{end}}</pre></details>
+{{else}}<br><code>{{.Text}}</code>{{if .Full}}<details class="args"><summary>full arguments</summary><pre>{{.Full}}</pre></details>{{end}}{{end}}{{end}}
 </td>
 </tr>
 {{else}}
