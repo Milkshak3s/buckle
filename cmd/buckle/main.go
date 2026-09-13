@@ -183,6 +183,15 @@ func cmdServe(args []string, stderr io.Writer) error {
 	if *refresh < 0 {
 		return usageError{"--refresh must not be negative"}
 	}
+	// serve runs fine either way. Under sudo (SUDO_USER set), it keeps the server database owned
+	// by the invoking user rather than root, the same way watch.go does for the endpoint database.
+	var owner *watch.Owner
+	if os.Geteuid() == 0 && os.Getenv("SUDO_USER") != "" {
+		var err error
+		if owner, err = watch.SudoOwner("serve", "it must leave your server database owned by you"); err != nil {
+			return err
+		}
+	}
 	path := *dbPath
 	if path == "" {
 		home, err := invokingHome()
@@ -191,15 +200,24 @@ func cmdServe(args []string, stderr io.Writer) error {
 		}
 		path = serverdb.PathForHome(home)
 	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+	logf := func(format string, a ...any) { fmt.Fprintf(stderr, "buckle: "+format+"\n", a...) }
+	dir := filepath.Dir(path)
+	_, statErr := os.Stat(dir)
+	dirCreated := errors.Is(statErr, os.ErrNotExist)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return err
+	}
+	if owner != nil && dirCreated {
+		chownServe(owner, stderr, dir)
 	}
 	db, err := serverdb.Open(path)
 	if err != nil {
 		return fmt.Errorf("open server database: %w", err)
 	}
 	defer db.Close()
-	logf := func(format string, a ...any) { fmt.Fprintf(stderr, "buckle: "+format+"\n", a...) }
+	if owner != nil {
+		chownServe(owner, stderr, path)
+	}
 	if host, _, err := net.SplitHostPort(*addr); err != nil {
 		return usageError{"--addr: " + err.Error()}
 	} else if ip := net.ParseIP(host); host != "localhost" && (ip == nil || !ip.IsLoopback()) {
@@ -230,6 +248,17 @@ func cmdServe(args []string, stderr io.Writer) error {
 		return err
 	}
 	return nil
+}
+
+// chownServe hands ownership of the server database (and, on first creation, its directory) to
+// the sudo invoker, mirroring internal/watch/watch.go's chown helper: os.Lchown, warn and continue
+// on any error other than the path not existing yet.
+func chownServe(o *watch.Owner, stderr io.Writer, paths ...string) {
+	for _, p := range paths {
+		if err := os.Lchown(p, o.UID, o.GID); err != nil && !errors.Is(err, os.ErrNotExist) {
+			fmt.Fprintf(stderr, "buckle: warning: chown %s: %v\n", p, err)
+		}
+	}
 }
 
 func cmdShip(args []string, stderr io.Writer) error {

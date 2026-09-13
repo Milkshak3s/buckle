@@ -94,7 +94,13 @@ func initSchema(db *sql.DB, path string) error {
 		return fmt.Errorf("serverdb: %s has schema version %d, want %d", path, v, schemaVersion)
 	}
 	var mode string
-	return db.QueryRow(`PRAGMA journal_mode=WAL`).Scan(&mode)
+	if err := db.QueryRow(`PRAGMA journal_mode=WAL`).Scan(&mode); err != nil {
+		return err
+	}
+	if mode != "wal" {
+		return fmt.Errorf("serverdb: journal_mode is %q, want wal", mode)
+	}
+	return nil
 }
 
 func (d *DB) Close() error { return d.DB.Close() }
