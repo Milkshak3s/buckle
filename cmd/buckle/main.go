@@ -208,14 +208,21 @@ func cmdServe(args []string, stderr io.Writer) error {
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+	shutdownDone := make(chan error, 1)
 	go func() {
 		<-ctx.Done()
 		shutdown, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		srv.Shutdown(shutdown)
+		shutdownDone <- srv.Shutdown(shutdown)
 	}()
 	logf("serving http://%s; database %s", *addr, path)
 	if err := srv.ListenAndServe(); !errors.Is(err, http.ErrServerClosed) {
+		stop() // release the shutdown goroutine; we're not waiting for it
+		return err
+	}
+	if err := <-shutdownDone; err != nil {
+		logf("shutdown: %v", err)
+		srv.Close()
 		return err
 	}
 	return nil
