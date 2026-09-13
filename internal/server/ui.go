@@ -38,7 +38,6 @@ type runsPage struct {
 
 type runPage struct {
 	Run      serverdb.RunDetail
-	Tree     procTree
 	Timeline []entry
 	Note     string
 }
@@ -164,9 +163,8 @@ func (s *server) funcs() template.FuncMap {
 			// content; the formatted value is a computed float, so this is safe.
 			return template.HTML(fmt.Sprintf("%+.3fs", float64(*at-start)/1e9))
 		},
-		"argv":     argv,
-		"deref":    func(p *int64) int64 { return *p },
-		"treeNode": newTreeNodeView,
+		"argv":  argv,
+		"deref": func(p *int64) int64 { return *p },
 		"platform": func(b *bool) template.HTML {
 			switch {
 			case b == nil:
@@ -262,7 +260,7 @@ func (s *server) run(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.render(w, "run", page{Title: fmt.Sprintf("Run %d", id),
-		Data: runPage{Run: d, Tree: processTree(d), Timeline: timeline(d), Note: report.LowerBoundNote}})
+		Data: runPage{Run: d, Timeline: timeline(d), Note: report.LowerBoundNote}})
 }
 
 // timeline interleaves process starts and ends with denials by time. Entries without a time go
