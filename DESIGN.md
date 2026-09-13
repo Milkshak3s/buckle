@@ -2,7 +2,7 @@
 
 buckle audits macOS Seatbelt sandbox execution. It watches `sandbox-exec` runs (including those launched by third-party tools such as Claude Code), records that a sandbox was applied and with which profile, and attributes kernel Sandbox denials to those runs. Records go to a local SQLite database.
 
-Status: design confirmed 2026-09-12. Development started 2026-09-13.
+Status: design confirmed 2026-09-12. Development started 2026-09-13. The report server demo was confirmed 2026-09-13 (§11, [spec](docs/superpowers/specs/2026-09-13-buckle-report-server-design.md)).
 
 > **macOS upgrades are paused (2026-09-13).** Until they resume, the effective target is **macOS 14.2 (arm64)**, where the §2 facts were verified. The §10 checklist is deferred until an upgrade happens; don't adopt APIs or behavior newer than 14.2.
 
@@ -13,7 +13,7 @@ Status: design confirmed 2026-09-12. Development started 2026-09-13.
 | Decision | Choice |
 |---|---|
 | Purpose | Audit your own sandboxed workloads: what each run was, and what got blocked |
-| Deployment | Your own dev Macs, run by hand |
+| Deployment | Your own dev Macs, run by hand. They can optionally ship data to a report server (§11). |
 | macOS support | Latest macOS only |
 | Sandbox kinds | `/usr/bin/sandbox-exec` runs from any launcher, plus in-process `sandbox_init()` users that pass the filter in §4.4 |
 | Out of scope | App Sandbox apps, Apple platform daemons, allowed-operation tracing, tamper resistance / hostile-host threat model, always-on daemon mode |
@@ -76,7 +76,9 @@ sudo buckle watch
      --predicate 'sender == "Sandbox"' │      tracking, denial buffer,
      --style ndjson           (ndjson)─┘      codesign cache)
 
-buckle query / report  (unprivileged, reads SQLite)
+buckle query / report  (reads SQLite; needs sudo while watch/ship hold the DB, §6)
+
+sudo buckle ship ──HTTP JSON──► buckle serve ──► server.db ──► web UI   (§11)
 ```
 
 - Language: **Go**, current arm64 toolchain, **no cgo**.
@@ -147,7 +149,7 @@ Runs already in progress when `watch` starts produce no exec event. A run like t
 
 ## 5. Query / report
 
-`buckle query` / `buckle report` run unprivileged against the user's DB.
+`buckle query` / `buckle report` run against the user's DB. They work without sudo unless a root process (`watch` or `ship`) holds the WAL files, in which case they ask for sudo (§6).
 
 v1 features:
 - **List sessions and runs**, filterable by time range, session, command substring, and has-denials.
@@ -168,6 +170,15 @@ There's no orphan command in v1. Inspect orphans with `sqlite3` directly.
 
 Main entities: `sessions`, `runs`, `processes`, `profiles` (by hash), `denials`, `orphans`. Columns get finalized in the implementation plan.
 
+**Schema v2 (2026-09-13):**
+- **Change tracking:** every table gets a `rev` column. Triggers stamp it from a global counter on each insert and update.
+- **`meta.db_instance`:** a random UUID identifying this DB.
+- **Journal mode** is WAL.
+- **Upgrading:** existing v1 DBs are refused until `buckle migrate`, run without sudo, upgrades them. New DBs start at v2.
+- **Privileges:** WAL files created by root `watch` are root-owned, so `ship` always needs sudo, and `query`/`report` need sudo while those files exist. This reverses the v1 plan's DELETE-mode choice, so that readers don't block `watch`.
+
+Details are in the [server spec](docs/superpowers/specs/2026-09-13-buckle-report-server-design.md) §2.
+
 ## 7. Testing
 
 - **Recorded fixtures:** capture real eslogger JSON and `log stream` ndjson once, then replay them in unit tests covering parsing, tree building, attribution, buffering, and duplicates.
@@ -176,7 +187,7 @@ Main entities: `sessions`, `runs`, `processes`, `profiles` (by hash), `denials`,
 ## 8. Explicit non-goals (v1)
 
 - `buckle run` wrapper, and profile authoring or suggestion helpers.
-- Always-on launchd daemon.
+- Always-on launchd daemon. `ship` and `serve` are foreground commands too.
 - Sessions for untagged launchers, or configurable tag formats.
 - Allowed-operation tracing.
 - Native Endpoint Security client (entitlement, system extension).
@@ -196,3 +207,13 @@ Main entities: `sessions`, `runs`, `processes`, `profiles` (by hash), `denials`,
 - [ ] `log stream --style ndjson` fields, and that no root is required.
 - [ ] `eslogger --list-events` still has `exec`, `fork`, `exit`, and the exec JSON still includes args, audit tokens, `is_platform_binary`, `cdhash`.
 - [ ] Claude Code's sandbox profile and tag format (`CMD64_..._END__..._SBX`).
+- [ ] `ioreg -rd1 -c IOPlatformExpertDevice` still reports `IOPlatformUUID`.
+
+## 11. Report server (demo)
+
+Confirmed 2026-09-13. This is a deliberate scope change: v1 was local-only. The full design is in [docs/superpowers/specs/2026-09-13-buckle-report-server-design.md](docs/superpowers/specs/2026-09-13-buckle-report-server-design.md).
+
+- **Topology:** designed for a central server with a few Macs. The demo has one Mac reporting to a server on loopback, with no auth and no TLS.
+- **`sudo buckle ship`:** a foreground loop (every 10s by default) that sends rows changed since the server's cursor. Host identity is `IOPlatformUUID` plus the hostname. On network or 5xx errors it retries with backoff; on a 4xx it exits.
+- **`buckle serve`:** mirrors endpoint rows into `server.db`, keyed by host, DB instance and local id. It ignores endpoint pruning and keeps history forever.
+- **UI:** server-rendered pages with no JS. A hosts page lists Claude sessions and "Untagged runs". A run detail page shows the raw argv, the profile, and a timeline of process events and denials. Times are shown in UTC and in the server's local time.

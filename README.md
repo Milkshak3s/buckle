@@ -23,9 +23,31 @@ sudo ./buckle watch --buffer 10s
 
 The database is `~/Library/Application Support/buckle/buckle.db`. It belongs to your user even though `watch` runs as root. Each `watch` start deletes runs older than 30 days.
 
+## Upgrading an existing database
+
+Databases created before the report server use schema v1. Upgrade once, without sudo, while `watch` isn't running:
+
+```sh
+./buckle migrate
+```
+
+## Report server (demo)
+
+Ship your local data to a web UI running on the same Mac:
+
+```sh
+./buckle serve                  # http://127.0.0.1:8080, no auth; data in ~/Library/Application Support/buckle/server.db
+sudo ./buckle watch             # in a second terminal
+sudo ./buckle ship              # in a third; sends changes every 10s to http://127.0.0.1:8080
+```
+
+Open http://127.0.0.1:8080 to see hosts and their Claude sessions, plus an "Untagged runs" group. Each run page shows the command, the profile, and a timeline of processes and denials. `serve` flags: `--addr`, `--db`, `--refresh 10s` (0 disables auto-refresh). `ship` flags: `--server`, `--interval`, `--db`.
+
+The server keeps its own history. Pruning on the endpoint never removes anything from the server.
+
 ## Query
 
-These commands don't need sudo:
+These commands don't need sudo, unless `watch` or `ship` is running: those root processes own the database's WAL files, so the query commands then ask you to re-run with sudo.
 
 ```sh
 ./buckle query sessions
