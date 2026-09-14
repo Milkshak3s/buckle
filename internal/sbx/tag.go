@@ -5,7 +5,7 @@ import (
 	"regexp"
 )
 
-// Tag is a Claude Code sandbox log tag: CMD64_<base64 command>_END_<suffix>, where the suffix
+// Tag is a Claude Code sandbox log tag: CMD64_<base64 payload>_END_<suffix>, where the suffix
 // (_<random>_SBX) is fixed for one Claude Code process and serves as the session key.
 type Tag struct {
 	Raw        string

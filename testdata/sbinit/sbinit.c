@@ -1,4 +1,4 @@
-// Non-platform binary that sandboxes itself with sandbox_init(), for §4.4 candidate fixtures.
+// Non-platform binary that sandboxes itself with sandbox_init(), for candidate fixtures (DESIGN §4.4).
 #include <fcntl.h>
 #include <sandbox.h>
 #include <stdio.h>

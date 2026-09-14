@@ -14,7 +14,7 @@ import (
 	"buckle/internal/wire"
 )
 
-// createV1 builds a schema v1 database with rows in every table, as buckle 0.1 left it.
+// createV1 builds a schema v1 database with rows in every table, as the first buckle builds left it.
 func createV1(t *testing.T) string {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "buckle.db")
@@ -263,8 +263,7 @@ func TestChangesSince(t *testing.T) {
 	}
 }
 
-// TestNewerSchemaVersionRefused covers spec §6: a database from a future buckle must be refused,
-// not silently treated as needing migration.
+// A database from a future buckle must be refused, not silently treated as needing migration.
 func TestNewerSchemaVersionRefused(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "buckle.db")
 	db, err := sql.Open("sqlite", path)
@@ -289,8 +288,8 @@ func TestNewerSchemaVersionRefused(t *testing.T) {
 	}
 }
 
-// TestMigratedDBTriggersFire covers spec §6: the rev triggers created by upgradeV2 must fire on a
-// migrated (backfilled) database, not just a fresh v2 one.
+// The rev triggers created by upgradeV2 must fire on a migrated (backfilled) database, not just a
+// fresh v2 one.
 func TestMigratedDBTriggersFire(t *testing.T) {
 	path := createV1(t)
 	if _, _, err := Migrate(path); err != nil {
@@ -316,8 +315,8 @@ func TestMigratedDBTriggersFire(t *testing.T) {
 	}
 }
 
-// TestPruneNullsChildParentRevBump covers spec §6: ON DELETE SET NULL of a child run's
-// parent_run_id must bump the child's rev so the server picks up the change.
+// ON DELETE SET NULL of a child run's parent_run_id must bump the child's rev so the server picks
+// up the change.
 func TestPruneNullsChildParentRevBump(t *testing.T) {
 	s, _ := openTemp(t)
 	old := t0.Add(-31 * 24 * time.Hour)

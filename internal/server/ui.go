@@ -255,7 +255,7 @@ func (s *server) funcs() template.FuncMap {
 		"argv":        argv,
 		"agent":       agentName,
 		"detailLabel": detailLabel,
-		"deref": func(p *int64) int64 { return *p },
+		"deref":       func(p *int64) int64 { return *p },
 		"platform": func(b *bool) template.HTML {
 			switch {
 			case b == nil:

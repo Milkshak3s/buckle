@@ -24,7 +24,11 @@ fi
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 OUT="${1:-$ROOT/testdata/fixtures/macos14.2-cursor}"
 USER_HOME="$(eval echo "~$SUDO_USER")"
-GO="${GO:-$USER_HOME/sdk/go1.27.1/bin/go}"
+GO="${GO:-$(sudo -u "$SUDO_USER" -i command -v go || true)}"
+if [[ -z "$GO" ]]; then
+  echo "go not found in $SUDO_USER's PATH; set GO=/path/to/go" >&2
+  exit 1
+fi
 STOP=/private/tmp/buckle-cursor-capture.stop
 RAW="$(mktemp -d /private/tmp/buckle-cursor-raw.XXXXXX)"
 chmod 700 "$RAW"

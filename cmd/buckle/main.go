@@ -251,8 +251,7 @@ func cmdServe(args []string, stderr io.Writer) error {
 }
 
 // chownServe hands ownership of the server database (and, on first creation, its directory) to
-// the sudo invoker, mirroring internal/watch/watch.go's chown helper: os.Lchown, warn and continue
-// on any error other than the path not existing yet.
+// the sudo invoker. Errors other than a missing path are only warnings.
 func chownServe(o *watch.Owner, stderr io.Writer, paths ...string) {
 	for _, p := range paths {
 		if err := os.Lchown(p, o.UID, o.GID); err != nil && !errors.Is(err, os.ErrNotExist) {

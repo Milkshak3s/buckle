@@ -7,7 +7,7 @@ Target: macOS 14.2 on Apple silicon.
 ## Build
 
 ```sh
-~/sdk/go1.27.1/bin/go build ./cmd/buckle
+go build ./cmd/buckle
 ```
 
 This is pure Go (no cgo), and the only dependency is `modernc.org/sqlite`.
@@ -75,7 +75,7 @@ sqlite3 ~/Library/Application\ Support/buckle/buckle.db 'select * from orphans o
 ## Tests
 
 ```sh
-~/sdk/go1.27.1/bin/go test ./...
+go test ./...
 ```
 
 Unit tests replay the fixture captured on macOS 14.2 in `testdata/fixtures/macos14.2`. To record a new one (needs sudo and Full Disk Access):
@@ -95,6 +95,6 @@ touch /private/tmp/buckle-cursor-capture.stop
 The end-to-end test runs real sandboxes. Build it as your user, then run it with sudo:
 
 ```sh
-~/sdk/go1.27.1/bin/go test -c -tags integration -o /tmp/buckle-itest ./integration
+go test -c -tags integration -o /tmp/buckle-itest ./integration
 sudo /tmp/buckle-itest -test.v
 ```
