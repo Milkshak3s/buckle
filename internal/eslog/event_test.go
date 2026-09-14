@@ -133,6 +133,33 @@ func TestParseDrift(t *testing.T) {
 	}
 }
 
+func TestParseExecEnv(t *testing.T) {
+	pred := func(e Event) bool { return e.Kind == KindExec && e.Target.Token.PID == 15543 }
+	m := findLine(t, pred)
+	exec := m["event"].(map[string]any)["exec"].(map[string]any)
+	exec["env"] = []any{"CURSOR_AGENT=1", "PATH=/usr/bin:/bin", "EMPTY="}
+	b, _ := json.Marshal(m)
+	ev, err := Parse(b)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ev.Env) != 3 || ev.Env[0] != "CURSOR_AGENT=1" || ev.Env[2] != "EMPTY=" {
+		t.Errorf("env = %q", ev.Env)
+	}
+
+	exec["env"] = map[string]any{"not": "an array"}
+	b, _ = json.Marshal(m)
+	if ev, err := Parse(b); err != nil || ev.Env != nil {
+		t.Errorf("odd env shape: env=%q err=%v; want nil env and no error", ev.Env, err)
+	}
+
+	delete(exec, "env")
+	b, _ = json.Marshal(m)
+	if ev, err := Parse(b); err != nil || ev.Env != nil {
+		t.Errorf("missing env: env=%q err=%v", ev.Env, err)
+	}
+}
+
 func TestParseSkipAndGarbage(t *testing.T) {
 	if _, err := Parse([]byte(`{"event":{"open":{}},"time":"2026-09-13T17:08:38.775921977Z"}`)); !errors.Is(err, ErrSkip) {
 		t.Errorf("open event err = %v", err)

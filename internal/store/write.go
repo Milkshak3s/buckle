@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 )
@@ -15,7 +16,8 @@ func PathForHome(home string) string {
 	return filepath.Join(home, "Library", "Application Support", "buckle", "buckle.db")
 }
 
-// Run is a new row in runs. ProfileText, when non-empty, is stored in profiles by SHA-256.
+// Run is a new row in runs. ProfileText, when non-empty, is stored in profiles by SHA-256; Env is
+// stored in run_env.
 type Run struct {
 	WatchID            int64
 	Kind               string // sandbox-exec | sandbox-init | adopted
@@ -33,6 +35,7 @@ type Run struct {
 	Extra              []string
 	Command            []string
 	Cwd                string
+	Env                map[string]string
 }
 
 // Process is a new row in processes: one process image (audit token).
@@ -165,6 +168,16 @@ func (s *Store) InsertRun(r Run) (int64, error) {
 	id, err := res.LastInsertId()
 	if err != nil {
 		return 0, err
+	}
+	names := make([]string, 0, len(r.Env))
+	for k := range r.Env {
+		names = append(names, k)
+	}
+	sort.Strings(names)
+	for _, k := range names {
+		if _, err := tx.Exec(`INSERT INTO run_env (run_id, name, value) VALUES (?, ?, ?)`, id, k, r.Env[k]); err != nil {
+			return 0, err
+		}
 	}
 	return id, tx.Commit()
 }

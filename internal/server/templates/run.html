@@ -14,7 +14,7 @@
 <dt>Working directory</dt><dd><code>{{$r.Cwd}}</code></dd>
 <dt>Started</dt><dd>{{ts $r.StartedAt}}</dd>
 <dt>Ended</dt><dd>{{ts $r.EndedAt}}</dd>
-{{if $r.TagCommand}}<dt>Claude tool use</dt><dd><code>{{$r.TagCommand}}</code></dd>{{end}}
+{{if $r.TagCommand}}<dt>{{detailLabel $r.SessionKind}}</dt><dd><code>{{$r.TagCommand}}</code></dd>{{end}}
 {{if $r.ParentRunID}}<dt>Parent run</dt><dd><a href="/hosts/{{$r.HostUUID}}/{{$r.DBInstance}}/runs/{{deref $r.ParentRunID}}">run {{deref $r.ParentRunID}}</a></dd>{{end}}
 {{if $r.Children}}<dt>Child runs</dt><dd>{{range $r.Children}}<a href="/hosts/{{$r.HostUUID}}/{{$r.DBInstance}}/runs/{{.}}">run {{.}}</a> {{end}}</dd>{{end}}
 <dt>Profile</dt><dd>{{$r.ProfileSource}}{{with $r.ProfileName}} · name <code>{{.}}</code>{{end}}{{with $r.ProfilePath}} · file <code>{{.}}</code>{{end}}{{with $r.ProfileError}} · <span class="note">{{.}}</span>{{end}}</dd>

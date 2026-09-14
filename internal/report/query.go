@@ -13,8 +13,8 @@ const LowerBoundNote = "denial counts are lower bounds: the kernel drops many de
 
 type Filter struct {
 	Since, Until *time.Time
-	Session      string // session key, e.g. _k3j9x0q2m_SBX
-	Command      string // substring of the space-joined command or the tag's decoded command
+	Session      string // session key, e.g. _k3j9x0q2m_SBX or a Cursor conversation id
+	Command      string // substring of the space-joined command or the run's tag_command
 	HasDenials   bool
 }
 

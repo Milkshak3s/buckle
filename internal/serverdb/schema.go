@@ -13,7 +13,8 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-const schemaVersion = 1
+// schemaVersion 2 added the run_env mirror (endpoint schema v3).
+const schemaVersion = 2
 
 type DB struct {
 	DB *sql.DB
@@ -31,12 +32,7 @@ func quote(id string) string { return `"` + id + `"` }
 func ddl() string {
 	var b strings.Builder
 	for _, t := range wire.Tables {
-		cols := make([]string, len(wire.Columns[t]))
-		for i, c := range wire.Columns[t] {
-			cols[i] = quote(c)
-		}
-		fmt.Fprintf(&b, "CREATE TABLE %s (host_uuid TEXT NOT NULL, db_instance TEXT NOT NULL, %s, PRIMARY KEY (host_uuid, db_instance, %s));\n",
-			quote(t), strings.Join(cols, ", "), quote(wire.Key(t)))
+		b.WriteString(mirrorTable(t))
 	}
 	b.WriteString(`
 CREATE TABLE hosts (uuid TEXT PRIMARY KEY, name TEXT NOT NULL, first_seen INTEGER NOT NULL, last_report_at INTEGER NOT NULL);
@@ -48,7 +44,19 @@ CREATE INDEX processes_run ON processes (host_uuid, db_instance, run_id);
 CREATE INDEX denials_run ON denials (host_uuid, db_instance, run_id);
 CREATE INDEX watches_host ON watches (host_uuid, started_at);
 `)
+	b.WriteString(runEnvIndex)
 	return b.String()
+}
+
+const runEnvIndex = "CREATE INDEX run_env_run ON run_env (host_uuid, db_instance, run_id);\n"
+
+func mirrorTable(t string) string {
+	cols := make([]string, len(wire.Columns[t]))
+	for i, c := range wire.Columns[t] {
+		cols[i] = quote(c)
+	}
+	return fmt.Sprintf("CREATE TABLE %s (host_uuid TEXT NOT NULL, db_instance TEXT NOT NULL, %s, PRIMARY KEY (host_uuid, db_instance, %s));\n",
+		quote(t), strings.Join(cols, ", "), quote(wire.Key(t)))
 }
 
 // Open opens (creating if needed) the server database.
@@ -75,13 +83,17 @@ func initSchema(db *sql.DB, path string) error {
 	}
 	switch v {
 	case schemaVersion:
-	case 0:
+	case 0, 1:
 		tx, err := db.Begin()
 		if err != nil {
 			return err
 		}
 		defer tx.Rollback()
-		if _, err := tx.Exec(ddl()); err != nil {
+		schema := ddl()
+		if v == 1 {
+			schema = mirrorTable("run_env") + runEnvIndex
+		}
+		if _, err := tx.Exec(schema); err != nil {
 			return fmt.Errorf("serverdb: create schema: %w", err)
 		}
 		if _, err := tx.Exec(fmt.Sprintf(`PRAGMA user_version = %d`, schemaVersion)); err != nil {

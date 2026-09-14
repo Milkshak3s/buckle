@@ -1,6 +1,6 @@
 {{define "content"}}
 {{$d := .Data}}
-<h1>{{with $d.Session}}Session {{if .Key}}<code>{{.Key}}</code>{{with .Kind}}<span class="tag">{{.}}</span>{{end}}{{else}}#{{.ID}} <span class="muted">(not received yet)</span>{{end}}{{else}}Untagged runs{{end}}</h1>
+<h1>{{with $d.Session}}Session {{if .Key}}<code>{{.Key}}</code>{{with .Kind}}<span class="tag">{{agent .}}</span>{{end}}{{else}}#{{.ID}} <span class="muted">(not received yet)</span>{{end}}{{else}}Untagged runs{{end}}</h1>
 {{with $d.Session}}{{if .Key}}<p class="meta">first seen {{ts .FirstSeen}} · last seen {{ts .LastSeen}}</p>{{end}}{{end}}
 <div class="stats">
 <div class="stat"><div class="k">Runs</div><div class="v">{{len $d.Runs}}</div></div>

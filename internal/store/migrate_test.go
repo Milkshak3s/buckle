@@ -3,6 +3,7 @@ package store
 import (
 	"database/sql"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
@@ -54,7 +55,7 @@ func journalMode(t *testing.T, s *Store) string {
 	return mode
 }
 
-func TestMigrateV1ToV2(t *testing.T) {
+func TestMigrateV1ToV3(t *testing.T) {
 	path := createV1(t)
 	inst, migrated, err := Migrate(path)
 	if err != nil {
@@ -67,8 +68,8 @@ func TestMigrateV1ToV2(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if v := count(t, s, `PRAGMA user_version`); v != 2 {
-		t.Errorf("user_version = %d, want 2", v)
+	if v := count(t, s, `PRAGMA user_version`); v != SchemaVersion {
+		t.Errorf("user_version = %d, want %d", v, SchemaVersion)
 	}
 	if m := journalMode(t, s); m != "wal" {
 		t.Errorf("journal_mode = %q, want wal", m)
@@ -112,10 +113,56 @@ func TestV1Refused(t *testing.T) {
 	}
 }
 
-func TestFreshDatabaseIsV2(t *testing.T) {
+// createV2 builds a schema v2 database with a run, as buckle left it before run_env existed.
+func createV2(t *testing.T) (path, inst string) {
+	t.Helper()
+	path = createV1(t)
+	inst, _, err := Migrate(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if _, err := db.Exec(`DROP TABLE run_env; PRAGMA user_version = 2`); err != nil {
+		t.Fatal(err)
+	}
+	return path, inst
+}
+
+func TestMigrateV2ToV3(t *testing.T) {
+	path, inst := createV2(t)
+	if _, err := Open(path); !errors.Is(err, ErrNeedsMigration) {
+		t.Errorf("Open v2: %v, want ErrNeedsMigration", err)
+	}
+	if _, err := OpenReadOnly(path); !errors.Is(err, ErrNeedsMigration) {
+		t.Errorf("OpenReadOnly v2: %v, want ErrNeedsMigration", err)
+	}
+	got, migrated, err := Migrate(path)
+	if err != nil || !migrated || got != inst {
+		t.Fatalf("Migrate v2 = %q, %v, %v; want %q, true, nil", got, migrated, err, inst)
+	}
+	s, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	before := count(t, s, `SELECT value FROM rev_counter`)
+	if _, err := s.InsertRun(Run{WatchID: 1, Kind: "sandbox-exec", StartedAt: t0, ProfileSource: "unknown",
+		Env: map[string]string{"CURSOR_AGENT": "1"}}); err != nil {
+		t.Fatal(err)
+	}
+	if n := count(t, s, `SELECT count(*) FROM run_env WHERE rev > ?`, before); n != 1 {
+		t.Errorf("run_env rows stamped after migration = %d, want 1 (trigger missing?)", n)
+	}
+}
+
+func TestFreshDatabaseIsCurrent(t *testing.T) {
 	s, _ := openTemp(t)
-	if v := count(t, s, `PRAGMA user_version`); v != 2 {
-		t.Errorf("user_version = %d, want 2", v)
+	if v := count(t, s, `PRAGMA user_version`); v != SchemaVersion {
+		t.Errorf("user_version = %d, want %d", v, SchemaVersion)
 	}
 	if m := journalMode(t, s); m != "wal" {
 		t.Errorf("journal_mode = %q, want wal", m)
@@ -224,7 +271,7 @@ func TestNewerSchemaVersionRefused(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.Exec(`PRAGMA user_version = 3`); err != nil {
+	if _, err := db.Exec(fmt.Sprintf(`PRAGMA user_version = %d`, SchemaVersion+1)); err != nil {
 		t.Fatal(err)
 	}
 	if err := db.Close(); err != nil {
@@ -232,13 +279,13 @@ func TestNewerSchemaVersionRefused(t *testing.T) {
 	}
 
 	if _, err := Open(path); err == nil || errors.Is(err, ErrNeedsMigration) {
-		t.Errorf("Open v3: %v, want a plain error (not nil, not ErrNeedsMigration)", err)
+		t.Errorf("Open newer: %v, want a plain error (not nil, not ErrNeedsMigration)", err)
 	}
 	if _, err := OpenReadOnly(path); err == nil || errors.Is(err, ErrNeedsMigration) {
-		t.Errorf("OpenReadOnly v3: %v, want a plain error (not nil, not ErrNeedsMigration)", err)
+		t.Errorf("OpenReadOnly newer: %v, want a plain error (not nil, not ErrNeedsMigration)", err)
 	}
 	if _, _, err := Migrate(path); err == nil || errors.Is(err, ErrNeedsMigration) {
-		t.Errorf("Migrate v3: %v, want a plain error (not nil, not ErrNeedsMigration)", err)
+		t.Errorf("Migrate newer: %v, want a plain error (not nil, not ErrNeedsMigration)", err)
 	}
 }
 

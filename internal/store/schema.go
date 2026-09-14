@@ -10,8 +10,6 @@ import (
 	"strings"
 	"syscall"
 
-	"buckle/internal/wire"
-
 	_ "modernc.org/sqlite"
 )
 
@@ -127,12 +125,17 @@ CREATE INDEX IF NOT EXISTS runs_rev ON runs(rev);
 CREATE INDEX IF NOT EXISTS processes_rev ON processes(rev);
 CREATE INDEX IF NOT EXISTS denials_rev ON denials(rev);
 CREATE INDEX IF NOT EXISTS orphans_rev ON orphans(rev);
+CREATE INDEX IF NOT EXISTS run_env_rev ON run_env(rev);
 `
 
-const schemaVersion = 2
+// SchemaVersion is the endpoint database schema this buckle reads and writes.
+const SchemaVersion = 3
+
+// v2Tables are the tables upgradeV2 adds change tracking to, in revision backfill order.
+var v2Tables = []string{"watches", "sessions", "profiles", "runs", "processes", "denials", "orphans"}
 
 var (
-	ErrNeedsMigration = errors.New("database is schema v1; run 'buckle migrate' (without sudo) first")
+	ErrNeedsMigration = errors.New("database schema is out of date; run 'buckle migrate' (without sudo) first")
 	ErrNeedsSudo      = errors.New("database is in use by a root process (buckle watch/ship); re-run with sudo")
 )
 
@@ -165,7 +168,7 @@ func upgradeV2(tx *sql.Tx) error {
 		return err
 	}
 	var offset int64
-	for _, t := range wire.Tables {
+	for _, t := range v2Tables {
 		if _, err := tx.Exec(`ALTER TABLE ` + t + ` ADD COLUMN rev INTEGER NOT NULL DEFAULT 0`); err != nil {
 			return err
 		}
@@ -182,6 +185,20 @@ func upgradeV2(tx *sql.Tx) error {
 		}
 	}
 	_, err = tx.Exec(`INSERT INTO rev_counter (id, value) VALUES (1, ?)`, offset)
+	return err
+}
+
+// upgradeV3 adds run_env: the session detectors' declared environment variables from each
+// sandbox-exec run's root exec.
+func upgradeV3(tx *sql.Tx) error {
+	_, err := tx.Exec(`CREATE TABLE run_env (
+  id INTEGER PRIMARY KEY,
+  run_id INTEGER NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+  name TEXT NOT NULL,
+  value TEXT NOT NULL,
+  rev INTEGER NOT NULL DEFAULT 0,
+  UNIQUE (run_id, name)
+);` + revTriggers("run_env"))
 	return err
 }
 
@@ -213,7 +230,7 @@ func openWritable(path string) (*sql.DB, error) {
 }
 
 // Open opens (creating if needed) the database at path for writing. New databases are created at
-// schema v2; v1 databases are refused with ErrNeedsMigration.
+// SchemaVersion; older ones are refused with ErrNeedsMigration.
 func Open(path string) (*Store, error) {
 	db, err := openWritable(path)
 	if err != nil {
@@ -227,8 +244,8 @@ func Open(path string) (*Store, error) {
 	return s, nil
 }
 
-// Migrate upgrades an existing v1 database at path to v2. It reports the db_instance and whether
-// anything changed.
+// Migrate upgrades an existing older database at path to SchemaVersion. It reports the db_instance
+// and whether anything changed.
 func Migrate(path string) (string, bool, error) {
 	if _, err := os.Stat(path); err != nil {
 		return "", false, err
@@ -247,7 +264,7 @@ func Migrate(path string) (string, bool, error) {
 	return inst, migrated, err
 }
 
-// OpenReadOnly opens an existing v2 database for queries only.
+// OpenReadOnly opens an existing current-schema database for queries only.
 func OpenReadOnly(path string) (*Store, error) {
 	if strings.Contains(path, "?") {
 		return nil, fmt.Errorf("store: path must not contain '?': %s", path)
@@ -271,15 +288,15 @@ func OpenReadOnly(path string) (*Store, error) {
 		db.Close()
 		return nil, err
 	}
-	switch v {
-	case schemaVersion:
+	switch {
+	case v == SchemaVersion:
 		return &Store{DB: db}, nil
-	case 1:
+	case v > 0 && v < SchemaVersion:
 		db.Close()
 		return nil, ErrNeedsMigration
 	}
 	db.Close()
-	return nil, fmt.Errorf("store: %s has schema version %d, want %d", path, v, schemaVersion)
+	return nil, fmt.Errorf("store: %s has schema version %d, want %d", path, v, SchemaVersion)
 }
 
 func (s *Store) Close() error { return s.DB.Close() }
@@ -291,21 +308,23 @@ func (s *Store) DBInstance() (string, error) {
 	return v, err
 }
 
-// migrate brings the schema to v2 (v1 only when allowV1) and enables WAL. It reports whether the
-// schema changed.
-func (s *Store) migrate(allowV1 bool) (bool, error) {
+// migrate brings the schema to SchemaVersion (upgrading an existing older database only when
+// allowOld) and enables WAL. It reports whether the schema changed.
+func (s *Store) migrate(allowOld bool) (bool, error) {
 	var v int
 	if err := s.DB.QueryRow(`PRAGMA user_version`).Scan(&v); err != nil {
 		return false, err
 	}
 	changed := false
 	switch {
-	case v == schemaVersion:
-	case v > schemaVersion:
-		return false, fmt.Errorf("store: database schema version %d is newer than this buckle (%d)", v, schemaVersion)
-	case v == 1 && !allowV1:
+	case v == SchemaVersion:
+	case v > SchemaVersion:
+		return false, fmt.Errorf("store: database schema version %d is newer than this buckle (%d)", v, SchemaVersion)
+	case v < 0:
+		return false, errors.New("store: unknown schema version")
+	case v > 0 && !allowOld:
 		return false, ErrNeedsMigration
-	case v == 0 || v == 1:
+	default:
 		tx, err := s.DB.Begin()
 		if err != nil {
 			return false, err
@@ -316,18 +335,21 @@ func (s *Store) migrate(allowV1 bool) (bool, error) {
 				return false, fmt.Errorf("store: create schema: %w", err)
 			}
 		}
-		if err := upgradeV2(tx); err != nil {
-			return false, fmt.Errorf("store: upgrade to v2: %w", err)
+		if v < 2 {
+			if err := upgradeV2(tx); err != nil {
+				return false, fmt.Errorf("store: upgrade to v2: %w", err)
+			}
 		}
-		if _, err := tx.Exec(fmt.Sprintf(`PRAGMA user_version = %d`, schemaVersion)); err != nil {
+		if err := upgradeV3(tx); err != nil {
+			return false, fmt.Errorf("store: upgrade to v3: %w", err)
+		}
+		if _, err := tx.Exec(fmt.Sprintf(`PRAGMA user_version = %d`, SchemaVersion)); err != nil {
 			return false, err
 		}
 		if err := tx.Commit(); err != nil {
 			return false, err
 		}
 		changed = true
-	default:
-		return false, errors.New("store: unknown schema version")
 	}
 	var mode string
 	if err := s.DB.QueryRow(`PRAGMA journal_mode=WAL`).Scan(&mode); err != nil {

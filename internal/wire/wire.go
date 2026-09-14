@@ -8,13 +8,13 @@ import (
 )
 
 // SchemaVersion is the endpoint database schema a batch's rows come from.
-const SchemaVersion = 2
+const SchemaVersion = 3
 
 // MaxRows caps the rows in one ingest request.
 const MaxRows = 1000
 
-// Tables lists the shipped tables in revision backfill order.
-var Tables = []string{"watches", "sessions", "profiles", "runs", "processes", "denials", "orphans"}
+// Tables lists the shipped tables.
+var Tables = []string{"watches", "sessions", "profiles", "runs", "run_env", "processes", "denials", "orphans"}
 
 // Columns is each shipped table's exact column set in schema order. The server builds its mirror
 // tables and SQL from it, so client-supplied names never reach SQL.
@@ -25,6 +25,7 @@ var Columns = map[string][]string{
 	"runs": {"id", "watch_id", "kind", "parent_run_id", "session_id", "tag", "tag_command", "started_at", "ended_at",
 		"status", "started_before_watch", "profile_source", "profile_hash", "profile_path", "profile_name", "profile_error",
 		"params_json", "extra_json", "command_json", "cwd", "rev"},
+	"run_env": {"id", "run_id", "name", "value", "rev"},
 	"processes": {"id", "run_id", "pid", "pidversion", "parent_process_id", "exec_prev_process_id", "ppid", "path", "args_json",
 		"is_platform_binary", "signing_id", "team_id", "cdhash", "started_at", "ended_at", "end_reason", "exit_status", "rev"},
 	"denials": {"id", "run_id", "process_id", "time", "process_name", "pid", "operation", "target", "message", "count", "rev"},

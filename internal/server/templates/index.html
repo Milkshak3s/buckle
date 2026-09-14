@@ -7,9 +7,9 @@
 {{range .Groups}}
 {{$inst := .DBInstance}}
 <table>
-<tr><th>Claude session</th><th>First seen</th><th>Last seen</th><th class="n">Runs</th><th class="n">Denials</th></tr>
+<tr><th>Session</th><th>First seen</th><th>Last seen</th><th class="n">Runs</th><th class="n">Denials</th></tr>
 {{range .Sessions}}
-<tr><td><a href="/hosts/{{$host.UUID}}/{{$inst}}/sessions/{{.ID}}"><code>{{.Key}}</code></a></td>
+<tr><td><a href="/hosts/{{$host.UUID}}/{{$inst}}/sessions/{{.ID}}"><code>{{.Key}}</code></a>{{with agent .Kind}} <span class="tag">{{.}}</span>{{end}}</td>
 <td class="t">{{utc .FirstSeen}}{{with local .FirstSeen}}<small>{{.}}</small>{{end}}</td>
 <td class="t">{{utc .LastSeen}}{{with local .LastSeen}}<small>{{.}}</small>{{end}}</td>
 <td class="n">{{.RunCount}}</td><td class="n"><span class="cnt {{denialClass .DenialCount}}">{{.DenialCount}}</span></td></tr>

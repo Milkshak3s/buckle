@@ -65,7 +65,7 @@ type RunDetail struct {
 	StartedBeforeWatch                                                              bool
 	Cwd, Tag, TagCommand, CommandJSON, ParamsJSON                                   string
 	SessionID                                                                       *int64
-	SessionKey                                                                      string
+	SessionKind, SessionKey                                                         string
 	ParentRunID                                                                     *int64
 	Children                                                                        []int64
 	ProfileSource, ProfileName, ProfilePath, ProfileError, ProfileHash, ProfileText string
@@ -230,7 +230,7 @@ func (d *DB) SessionRuns(host, inst string, id int64) (SessionSummary, []RunSumm
 	return s, runs, nil
 }
 
-// UntaggedRuns lists runs with no Claude session.
+// UntaggedRuns lists runs no session detector claimed.
 func (d *DB) UntaggedRuns(host, inst string) ([]RunSummary, error) {
 	return d.runSummaries(`r.session_id IS NULL`, host, inst)
 }
@@ -243,7 +243,7 @@ func (d *DB) Run(host, inst string, id int64) (RunDetail, error) {
 	var profileText sql.NullString
 	err := d.DB.QueryRow(`SELECT r.id, coalesce(r.kind, ''), coalesce(r.status, ''), coalesce(r.started_at, 0), r.ended_at,
 		r.started_before_watch, coalesce(r.cwd, ''), coalesce(r.tag, ''), coalesce(r.tag_command, ''),
-		coalesce(r.command_json, '[]'), coalesce(r.params_json, '[]'), r.session_id, coalesce(s.key, ''), r.parent_run_id,
+		coalesce(r.command_json, '[]'), coalesce(r.params_json, '[]'), r.session_id, coalesce(s.kind, ''), coalesce(s.key, ''), r.parent_run_id,
 		coalesce(r.profile_source, ''), coalesce(r.profile_name, ''), coalesce(r.profile_path, ''), coalesce(r.profile_error, ''),
 		coalesce(r.profile_hash, ''), pr.text, coalesce(h.name, '')
 		FROM runs r
@@ -252,7 +252,7 @@ func (d *DB) Run(host, inst string, id int64) (RunDetail, error) {
 		LEFT JOIN hosts h ON h.uuid = r.host_uuid
 		WHERE r.host_uuid = ? AND r.db_instance = ? AND r.id = ?`, host, inst, id).Scan(
 		&r.ID, &r.Kind, &r.Status, &r.StartedAt, &ended, &sbw, &r.Cwd, &r.Tag, &r.TagCommand,
-		&r.CommandJSON, &r.ParamsJSON, &session, &r.SessionKey, &parent,
+		&r.CommandJSON, &r.ParamsJSON, &session, &r.SessionKind, &r.SessionKey, &parent,
 		&r.ProfileSource, &r.ProfileName, &r.ProfilePath, &r.ProfileError, &r.ProfileHash, &profileText, &r.HostName)
 	if errors.Is(err, sql.ErrNoRows) {
 		return r, ErrNotFound

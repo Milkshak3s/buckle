@@ -59,6 +59,7 @@ type Event struct {
 	Target        Proc     // exec: new image; fork: child
 	Args          []string // exec only
 	Cwd           string   // exec only
+	Env           []string // exec only: KEY=value entries; nil when absent or not a string array
 	ExitStatus    int      // exit only
 	SchemaVersion int
 }
@@ -144,6 +145,7 @@ func Parse(line []byte) (Event, error) {
 			Cwd    *struct {
 				Path string `json:"path"`
 			} `json:"cwd"`
+			Env json.RawMessage `json:"env"`
 		}
 		if err := json.Unmarshal(body, &x); err != nil {
 			return Event{}, &DriftError{Field: prefix}
@@ -157,6 +159,12 @@ func Parse(line []byte) (Event, error) {
 		ev.Args = *x.Args
 		if x.Cwd != nil {
 			ev.Cwd = x.Cwd.Path
+		}
+		// env is optional input to session detectors, so an unexpected shape is ignored rather
+		// than reported as drift.
+		var env []string
+		if len(x.Env) > 0 && json.Unmarshal(x.Env, &env) == nil {
+			ev.Env = env
 		}
 	case KindFork:
 		var x struct {

@@ -1,8 +1,8 @@
 # buckle — Design
 
-buckle audits macOS Seatbelt sandbox execution. It watches `sandbox-exec` runs (including those launched by third-party tools such as Claude Code), records that a sandbox was applied and with which profile, and attributes kernel Sandbox denials to those runs. Records go to a local SQLite database.
+buckle audits macOS Seatbelt sandbox execution. It watches `sandbox-exec` runs (including those launched by third-party agents such as Claude Code and Cursor's `cursor-agent`), records that a sandbox was applied and with which profile, groups runs into agent sessions, and attributes kernel Sandbox denials to those runs. Records go to a local SQLite database.
 
-Status: design confirmed 2026-09-12. Development started 2026-09-13. The report server demo was confirmed 2026-09-13 (§11, [spec](docs/superpowers/specs/2026-09-13-buckle-report-server-design.md)).
+Status: design confirmed 2026-09-12. Development started 2026-09-13. The report server demo was confirmed 2026-09-13 (§11, [spec](docs/superpowers/specs/2026-09-13-buckle-report-server-design.md)). Cursor support through pluggable session detectors was confirmed 2026-09-13 (§4.5).
 
 > **macOS upgrades are paused (2026-09-13).** Until they resume, the effective target is **macOS 14.2 (arm64)**, where the §2 facts were verified. The §10 checklist is deferred until an upgrade happens; don't adopt APIs or behavior newer than 14.2.
 
@@ -49,7 +49,7 @@ These were checked on macOS 14.2 (arm64, SIP on). **Re-verify all of them after 
 - Requires root, and the responsible process (your terminal) needs Full Disk Access.
 - Its man page says it is "NOT API", so its JSON structure isn't guaranteed. JSON mirrors `es_message_t` (e.g. `.process.audit_token.pid`, `.event.exec.target.executable.path`) and includes `schema_version` and `version`.
 - **No event type relates to sandboxing**, and ES structs have **no entitlement or sandbox fields**.
-- The useful `es_process_t` fields are `audit_token` (pid + pidversion), `ppid`, `original_ppid`, `parent_audit_token`, `responsible_audit_token`, `is_platform_binary`, `codesigning_flags`, `signing_id`, `team_id`, `cdhash`, `executable`, and `start_time`. Exec events also include args.
+- The useful `es_process_t` fields are `audit_token` (pid + pidversion), `ppid`, `original_ppid`, `parent_audit_token`, `responsible_audit_token`, `is_platform_binary`, `codesigning_flags`, `signing_id`, `team_id`, `cdhash`, `executable`, and `start_time`. Exec events also include args and `env`, the new image's environment as `KEY=value` strings. The environment can hold secrets, so buckle keeps only variables a session detector declares (§4.5).
 - There is no system-wide process-creation notification without ES.
 - **exec bumps pidversion** (verified 2026-09-13, fixture `testdata/fixtures/macos14.2`). In an exec event, `process.audit_token` is the old image and `event.exec.target.audit_token` is the new one, so each exec'd image has its own token. `/bin/sh` execs `/bin/bash` on the same pid.
 - Background grandchildren are reparented (`ppid 1` by the time they exec). Tree membership therefore has to follow fork/exec edges, not `ppid`.
@@ -65,6 +65,14 @@ These were checked on macOS 14.2 (arm64, SIP on). **Re-verify all of them after 
   - One `sandbox-exec` run per Bash tool call. The sandbox-exec image execs `/bin/zsh`, which runs the command as child processes.
   - Every zsh logs a tagged `mach-lookup com.apple.diagnosticd` denial, and curl logs dozens of them.
   - Denied writes from Homebrew `python3` and `node` (non-platform) produced no log lines at all, while `touch`, `sh`/`bash` and `curl` did.
+- **Cursor** (`cursor-agent` CLI 2026.09.10, checked 2026-09-13; live buckle test and fixture `testdata/fixtures/macos14.2-cursor`):
+  - The sandbox is opt-in for the CLI (`--sandbox enabled`, or `sandbox.mode` in `~/.cursor/cli-config.json`). Cursor.app ships the same helper, but only the CLI is in scope.
+  - node spawns one `cursorsandbox --policy <file> -- /bin/zsh -c <wrapper>` per shell command. `cursorsandbox` is Anysphere-signed (team DCNK4UB866), non-platform, and has no App Sandbox entitlement. It stays alive and forks a child that runs `/usr/bin/sandbox-exec -p <~5.3KB profile> -DWRITABLE_ROOT_0=<cwd> …`, never `-f`.
+  - The profile starts `(version 1)`, `(deny default)` and contains `; Added on top of Chrome profile`. It has no session tag, and deny rules carry no `with message`.
+  - The agent sets `CURSOR_AGENT=1`, `CURSOR_CONVERSATION_ID` (a UUID matching `~/.cursor/chats/<md5(workspace)>/<uuid>`) and `CURSOR_REQUEST_ID` (one UUID per agent turn, shared by the turn's commands) on every command. `cursorsandbox` overwrites `CURSOR_SANDBOX` from `native` to `seatbelt`. **Verified in eslogger:** the sandbox-exec exec event's `env` carries all four, with `CURSOR_SANDBOX=seatbelt`.
+  - The shell command is the last argv entry after `/bin/zsh -c <snapshot wrapper> --`. The wrapper and every tool it runs (`base64`, `tr`, `grep`, `awk`, `date`) log `file-write-data /dev/dtracehelper` denials, and zsh logs `mach-lookup` denials, so every command shows about 20 denials of noise.
+  - Cursor's approval layer rejects commands that name paths outside the workspace before anything is sandboxed. Those never reach Seatbelt, so buckle sees nothing for them.
+  - Network policy is enforced by a separate, unsandboxed `cursorsandbox --run-proxy` process through `HTTP_PROXY`/`ALL_PROXY`, not by Seatbelt, so its blocks never reach the Sandbox log.
 
 ## 3. Architecture
 
@@ -117,10 +125,26 @@ The entitlement check is **lazy**. It runs `/usr/bin/codesign` when the candidat
 This filter never applies to sandbox-exec trees, which are tracked regardless (sandbox-exec is itself a platform binary).
 
 ### 4.5 Sessions
-- A session exists **only** when a known tag format is recognized. v1 hardcodes **Claude Code's** tag.
-- The tag is read from the profile text at exec time (`with message` / `; LogTag:`), which means runs with no denials still get their session. It is also read from denial lines.
-- Session id is the tag suffix (`_<random>_SBX`). The command is decoded from `CMD64_<base64>_END`.
-- Untagged runs have no session.
+- A session exists **only** when a compiled-in **session detector** (`internal/detect`) claims a run. Every detector sees every sandbox-exec run, in registry order, and the first match wins.
+- **Detector input** (`RunStart`) comes from the sandbox-exec exec: the profile text, argv, and the declared environment variables. Output (`Match`) is a session key, a detail string stored in `runs.tag_command`, and an optional raw tag stored in `runs.tag`. `sessions.kind` holds the detector's kind.
+- **Environment:** the run's root exec keeps every variable that *any* detector declares, by exact name, in `run_env`, whether or not a detector matched. Nothing else from the environment is stored. The UI doesn't render it.
+- **Denial detectors** optionally also read denial messages. They attach a session to a run from a later denial and drive pre-watch adoption (§4.8).
+
+| Kind | Recognized by | Session key | Detail (label) | Denial detector |
+|---|---|---|---|---|
+| `claude-code` | Claude Code tag `CMD64_<b64>_END__<suffix>_SBX` in the profile text | tag suffix `_<random>_SBX` | decoded payload, the tool_use id ("Claude tool use") | yes |
+| `cursor` | profile contains `; Added on top of Chrome profile` | `CURSOR_CONVERSATION_ID`, or `unknown` when missing | `CURSOR_REQUEST_ID` ("Cursor request") | no |
+
+- Runs no detector claims have no session ("untagged").
+- **Cursor limitations:** there's no pre-watch adoption, since its denials carry no tag. Network-policy blocks aren't recorded, since they're enforced by its proxy, not Seatbelt (§2). Preflight or other helper sandbox-exec runs that carry the fingerprint are recorded like any other run.
+
+#### Adding a detector
+1. Capture the agent's sandbox-exec exec (argv, profile, env) and a few denials. Look for something stable that identifies the agent, and for a per-session identifier.
+2. Add a type in `internal/detect` implementing `Detector` (`Kind`, `DisplayName`, `DetailLabel`, `EnvVars`, `DetectRun`). Also implement `DenialDetector` if its denial messages carry the session.
+3. Append it to `detect.All`. Order matters only if two detectors could match the same run. A kind is stored data, so never rename one.
+4. Declare only the environment variables you need, by exact name. They're stored and shipped to the report server.
+5. Add unit tests in `internal/detect` and a correlator test with a synthetic exec. Record a fixture with a capture script that strips the environment (see `scripts/capture-cursor-fixture.sh` and `scripts/stripenv`).
+6. Update the §2 facts, this table, and the §10 checklist.
 
 ### 4.6 Denials
 - Parse `eventMessage` into process name, pid, deny count, operation, target, and optional trailing tag.
@@ -140,7 +164,7 @@ The two streams arrive independently, so a denial can show up before its exec/fo
   - Otherwise it is dropped (system noise).
 
 ### 4.8 Pre-existing runs
-Runs already in progress when `watch` starts produce no exec event. A run like that is **adopted partially** only when a denial carries a **recognized tag**. It is marked "started before watch", with the profile unknown. Untagged pre-existing processes are ignored.
+Runs already in progress when `watch` starts produce no exec event. A run like that is **adopted partially** only when a denial carries a tag a **denial detector** recognizes (today only Claude Code's). It is marked "started before watch", with the profile unknown. Untagged pre-existing processes are ignored.
 
 ### 4.9 Failure and shutdown
 - **eslogger schema drift:** parse only the needed fields and warn when they're missing. Don't exit on that alone.
@@ -179,16 +203,22 @@ Main entities: `sessions`, `runs`, `processes`, `profiles` (by hash), `denials`,
 
 Details are in the [server spec](docs/superpowers/specs/2026-09-13-buckle-report-server-design.md) §2.
 
+**Schema v3 (2026-09-13):**
+- **`run_env(id, run_id → runs ON DELETE CASCADE, name, value, rev, UNIQUE(run_id, name))`** stores the declared environment variables of each sandbox-exec run's root exec (§4.5). It has the same rev triggers as every other table and is pruned with its run.
+- **Upgrading:** `buckle migrate` upgrades v1 or v2 databases. `watch`, `ship`, `query` and `report` refuse older schemas.
+- **Wire and server:** `schema_version` is 3, and `run_env` is a shipped table. `server.db` goes to its own schema 2 (a `run_env` mirror), which `serve` applies automatically when it opens an older `server.db`. A v3 server answers 409 to v2 shippers, and vice versa.
+
 ## 7. Testing
 
-- **Recorded fixtures:** capture real eslogger JSON and `log stream` ndjson once, then replay them in unit tests covering parsing, tree building, attribution, buffering, and duplicates.
+- **Recorded fixtures:** capture real eslogger JSON and `log stream` ndjson once, then replay them in unit tests covering parsing, tree building, attribution, buffering, and duplicates. Cursor has its own fixture from a live `cursor-agent` session (`scripts/capture-cursor-fixture.sh`), with the environment stripped to declared variables.
 - **Local integration (opt-in, sudo):** an end-to-end test that runs real `sandbox-exec` workloads (including multi-process trees and tagged profiles) on this Mac and checks the DB contents.
 
 ## 8. Explicit non-goals (v1)
 
 - `buckle run` wrapper, and profile authoring or suggestion helpers.
 - Always-on launchd daemon. `ship` and `serve` are foreground commands too.
-- Sessions for untagged launchers, or configurable tag formats.
+- Sessions for launchers without a compiled-in detector, or detectors defined in configuration.
+- Cursor.app and Cursor cloud/background agents (only the `cursor-agent` CLI is covered), and Cursor's network-policy blocks, which aren't Seatbelt denials.
 - Allowed-operation tracing.
 - Native Endpoint Security client (entitlement, system extension).
 - Signed or notarized distribution.
@@ -207,6 +237,7 @@ Details are in the [server spec](docs/superpowers/specs/2026-09-13-buckle-report
 - [ ] `log stream --style ndjson` fields, and that no root is required.
 - [ ] `eslogger --list-events` still has `exec`, `fork`, `exit`, and the exec JSON still includes args, audit tokens, `is_platform_binary`, `cdhash`.
 - [ ] Claude Code's sandbox profile and tag format (`CMD64_..._END__..._SBX`).
+- [ ] Cursor's profile still contains `; Added on top of Chrome profile`, and `CURSOR_CONVERSATION_ID` / `CURSOR_REQUEST_ID` still appear in eslogger's exec `env` for its sandbox-exec.
 - [ ] `ioreg -rd1 -c IOPlatformExpertDevice` still reports `IOPlatformUUID`.
 
 ## 11. Report server (demo)
@@ -216,4 +247,4 @@ Confirmed 2026-09-13. This is a deliberate scope change: v1 was local-only. The 
 - **Topology:** designed for a central server with a few Macs. The demo has one Mac reporting to a server on loopback, with no auth and no TLS.
 - **`sudo buckle ship`:** a foreground loop (every 10s by default) that sends rows changed since the server's cursor. Host identity is `IOPlatformUUID` plus the hostname. On network or 5xx errors it retries with backoff; on a 4xx it exits.
 - **`buckle serve`:** mirrors endpoint rows into `server.db`, keyed by host, DB instance and local id. It ignores endpoint pruning and keeps history forever.
-- **UI:** server-rendered pages with no JS. A hosts page lists Claude sessions and "Untagged runs". A run detail page shows the raw argv, the profile, and a timeline of process events and denials. Times are shown in UTC and in the server's local time.
+- **UI:** server-rendered pages with no JS. A hosts page lists sessions, each with an agent badge (display names come from the compiled-in detector registry; unknown kinds show as stored), and "Untagged runs". The run page labels `tag_command` per agent. A run detail page shows the raw argv, the profile, and a timeline of process events and denials. Times are shown in UTC and in the server's local time.

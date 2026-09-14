@@ -10,6 +10,7 @@ import (
 	"sort"
 	"time"
 
+	"buckle/internal/detect"
 	"buckle/internal/eslog"
 	"buckle/internal/sbx"
 	"buckle/internal/store"
@@ -48,8 +49,6 @@ type Deps struct {
 }
 
 const (
-	sessionKindClaude = "claude-code"
-
 	kindSandboxExec = "sandbox-exec"
 	kindSandboxInit = "sandbox-init"
 	kindAdopted     = "adopted"
@@ -129,7 +128,7 @@ type Correlator struct {
 	byPID   map[int][]*image // ordered by start
 	seen    map[int]seenInfo // every pid in an exec/fork event this watch
 	runs    []*run
-	adopted map[string]*run // by raw tag
+	adopted map[string]*run // by detector kind and raw tag
 
 	pendingByPID map[int][]*pending
 	lastPending  map[denialKey]*pending
@@ -266,12 +265,13 @@ func (c *Correlator) startSandboxExecRun(ev eslog.Event, parent *run) (*run, err
 		sr.ProfileName = spec.Name
 	}
 	r := &run{kind: kindSandboxExec, live: map[*image]struct{}{}}
-	if tag, ok := sbx.FindTag(sr.ProfileText); ok {
-		sid, err := c.sink.EnsureSession(sessionKindClaude, tag.Suffix, ev.Time)
+	sr.Env = detect.PickEnv(ev.Env)
+	if det, m, ok := detect.Run(detect.RunStart{ProfileText: sr.ProfileText, Argv: ev.Args, Env: sr.Env}); ok {
+		sid, err := c.sink.EnsureSession(det.Kind(), m.Key, ev.Time)
 		if err != nil {
 			return nil, err
 		}
-		sr.SessionID, sr.Tag, sr.TagCommand = &sid, tag.Raw, tag.Command
+		sr.SessionID, sr.Tag, sr.TagCommand = &sid, m.Raw, m.Detail
 		r.hasSession = true
 	}
 	id, err := c.sink.InsertRun(sr)
@@ -483,12 +483,12 @@ func (c *Correlator) attribute(p *pending, img *image) error {
 	if r.hasSession {
 		return nil
 	}
-	if tag, ok := sbx.FindTag(d.Message); ok {
-		sid, err := c.sink.EnsureSession(sessionKindClaude, tag.Suffix, d.Time)
+	if det, m, ok := detect.Denial(d.Message); ok {
+		sid, err := c.sink.EnsureSession(det.Kind(), m.Key, d.Time)
 		if err != nil {
 			return err
 		}
-		if err := c.sink.SetRunSession(r.id, sid, tag.Raw, tag.Command); err != nil {
+		if err := c.sink.SetRunSession(r.id, sid, m.Raw, m.Detail); err != nil {
 			return err
 		}
 		r.hasSession = true
@@ -552,7 +552,7 @@ func (c *Correlator) Tick(now time.Time) error {
 }
 
 // finalize decides the fate of a denial whose buffer window is over:
-// attribute, adopt (Claude tag), sandbox_init candidate, orphan, or drop.
+// attribute, adopt (session tag in the message), sandbox_init candidate, orphan, or drop.
 // classify is false when process events may be incomplete; then only attribution and orphaning apply.
 func (c *Correlator) finalize(p *pending, classify bool) error {
 	d := p.d
@@ -564,8 +564,8 @@ func (c *Correlator) finalize(p *pending, classify bool) error {
 	if img != nil && img.run != nil {
 		return c.attribute(p, img)
 	}
-	if tag, ok := sbx.FindTag(d.Message); ok && classify {
-		r, err := c.adopt(tag, d)
+	if det, m, ok := detect.Denial(d.Message); ok && classify {
+		r, err := c.adopt(det, m, d)
 		if err != nil {
 			return err
 		}
@@ -612,11 +612,12 @@ func (c *Correlator) finalize(p *pending, classify bool) error {
 	return nil
 }
 
-func (c *Correlator) adopt(tag sbx.Tag, d ulog.Denial) (*run, error) {
-	if r, ok := c.adopted[tag.Raw]; ok {
+func (c *Correlator) adopt(det detect.Detector, m detect.Match, d ulog.Denial) (*run, error) {
+	key := det.Kind() + "\x00" + m.Raw
+	if r, ok := c.adopted[key]; ok {
 		return r, nil
 	}
-	sid, err := c.sink.EnsureSession(sessionKindClaude, tag.Suffix, d.Time)
+	sid, err := c.sink.EnsureSession(det.Kind(), m.Key, d.Time)
 	if err != nil {
 		return nil, err
 	}
@@ -624,8 +625,8 @@ func (c *Correlator) adopt(tag sbx.Tag, d ulog.Denial) (*run, error) {
 		WatchID:            c.cfg.WatchID,
 		Kind:               kindAdopted,
 		SessionID:          &sid,
-		Tag:                tag.Raw,
-		TagCommand:         tag.Command,
+		Tag:                m.Raw,
+		TagCommand:         m.Detail,
 		StartedAt:          d.Time,
 		StartedBeforeWatch: true,
 		ProfileSource:      string(sbx.SourceUnknown),
@@ -635,7 +636,7 @@ func (c *Correlator) adopt(tag sbx.Tag, d ulog.Denial) (*run, error) {
 	}
 	r := &run{id: id, kind: kindAdopted, live: map[*image]struct{}{}, hasSession: true}
 	c.runs = append(c.runs, r)
-	c.adopted[tag.Raw] = r
+	c.adopted[key] = r
 	return r, nil
 }
 

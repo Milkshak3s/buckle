@@ -42,8 +42,8 @@ const usage = `usage:
 filters:
   --since TIME      RFC 3339 time or a duration ago (e.g. 24h)
   --until TIME      RFC 3339 time or a duration ago
-  --session KEY     Claude Code session key (e.g. _k3j9x0q2m_SBX)
-  --command TEXT    substring of the run's command or tagged command
+  --session KEY     session key: Claude Code tag suffix (e.g. _k3j9x0q2m_SBX) or Cursor conversation id
+  --command TEXT    substring of the run's command or its session detail (tag_command)
   --has-denials     only runs with at least one denial
   --db PATH         database (default: ~/Library/Application Support/buckle/buckle.db)
 
@@ -161,9 +161,9 @@ func cmdMigrate(args []string, stdout, stderr io.Writer) error {
 		return err
 	}
 	if migrated {
-		fmt.Fprintf(stdout, "migrated %s to schema v2 (db_instance %s)\n", path, inst)
+		fmt.Fprintf(stdout, "migrated %s to schema v%d (db_instance %s)\n", path, store.SchemaVersion, inst)
 	} else {
-		fmt.Fprintf(stdout, "%s is already schema v2 (db_instance %s)\n", path, inst)
+		fmt.Fprintf(stdout, "%s is already schema v%d (db_instance %s)\n", path, store.SchemaVersion, inst)
 	}
 	return nil
 }

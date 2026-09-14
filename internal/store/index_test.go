@@ -11,6 +11,7 @@ func TestForeignKeyColumnsIndexed(t *testing.T) {
 	s, path := openTemp(t)
 	cols := [][2]string{
 		{"runs", "watch_id"}, {"runs", "parent_run_id"}, {"runs", "session_id"}, {"runs", "profile_hash"},
+		{"run_env", "run_id"}, {"run_env", "rev"},
 		{"processes", "run_id"}, {"processes", "parent_process_id"}, {"processes", "exec_prev_process_id"},
 		{"denials", "run_id"}, {"denials", "process_id"},
 		{"orphans", "watch_id"}, {"orphans", "time"},

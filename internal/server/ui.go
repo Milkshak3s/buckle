@@ -15,6 +15,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"buckle/internal/detect"
 	"buckle/internal/report"
 	"buckle/internal/sbx"
 	"buckle/internal/serverdb"
@@ -202,6 +203,22 @@ func newArgsView(path, js string) *argsView {
 	return v
 }
 
+// agentName is a session kind's display name; kinds this build doesn't know show as stored.
+func agentName(kind string) string {
+	if d, ok := detect.ByKind(kind); ok {
+		return d.DisplayName()
+	}
+	return kind
+}
+
+// detailLabel names a run's tag_command for its session kind.
+func detailLabel(kind string) string {
+	if d, ok := detect.ByKind(kind); ok {
+		return d.DetailLabel()
+	}
+	return "Tag detail"
+}
+
 func nsOf(v any) (int64, bool) {
 	switch x := v.(type) {
 	case int64:
@@ -235,7 +252,9 @@ func (s *server) funcs() template.FuncMap {
 			// content; the formatted value is a computed float, so this is safe.
 			return template.HTML(fmt.Sprintf("%+.3fs", float64(*at-start)/1e9))
 		},
-		"argv":  argv,
+		"argv":        argv,
+		"agent":       agentName,
+		"detailLabel": detailLabel,
 		"deref": func(p *int64) int64 { return *p },
 		"platform": func(b *bool) template.HTML {
 			switch {
